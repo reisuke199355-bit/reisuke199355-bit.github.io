@@ -68,6 +68,11 @@ class Site:
         return "".join('<a href="%s%s">%s</a>' % (root, n["href"], common.esc(n["label"]))
                        for n in self.cfg.get("nav", []))
 
+    def footer_nav_html(self, root):
+        """フッターに並べるリンク（プライバシーポリシーなど）。"""
+        return "".join(' ・ <a href="%s%s">%s</a>' % (root, n["href"], common.esc(n["label"]))
+                       for n in self.cfg.get("footer_nav", []))
+
     def feed_bits(self, root):
         if not self.site_url:
             return "", ""
@@ -97,6 +102,7 @@ class Site:
             canonical=self.canonical(canonical_url) if canonical_url else "",
             feed_link=feed_link,
             feed_foot=feed_foot,
+            footer_nav=self.footer_nav_html(root),
         )
         write(rel_out, html)
 

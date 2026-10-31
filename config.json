@@ -31,5 +31,11 @@
       "label": "このサイト",
       "href": "about/"
     }
+  ],
+  "footer_nav": [
+    {
+      "label": "プライバシーポリシー",
+      "href": "privacy/"
+    }
   ]
 }

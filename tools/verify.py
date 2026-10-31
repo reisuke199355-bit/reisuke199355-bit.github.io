@@ -76,6 +76,11 @@ def check_against_xml(xml_path):
             continue
         if got["title"] == src["title"]:
             same_title += 1
+        elif got.get("original_title") == src["title"]:
+            # こちらで直したタイトル。元の文字列を original_title に残してある。
+            same_title += 1
+            print("  [注記] id=%s はタイトルを直しています: 「%s」 → 「%s」"
+                  % (wp_id, src["title"], got["title"]))
         else:
             fail("タイトルが違います id=%s: 「%s」 → 「%s」"
                  % (wp_id, src["title"], got["title"]))
