@@ -1,31 +1,20 @@
-/* れいすけの日常の記録 — 日本語の長文を読みやすくすることを第一にした設計 */
+/* れいすけの日常の記録 — 明るいライトテーマ。日本語の長文を読みやすくすることを第一にした設計 */
 
 :root {
-  --bg: #fcfbf8;
-  --bg-raised: #ffffff;
-  --text: #272523;
-  --text-muted: #6b6760;
-  --text-faint: #938d84;
-  --rule: #e6e2da;
-  --accent: #2f6d62;
-  --accent-soft: #e8f1ef;
-  --shadow: 0 1px 2px rgba(39, 37, 35, .05);
+  --bg: #f3f5f6;          /* ページ全体：薄いグレー */
+  --bg-raised: #ffffff;   /* カード・囲みの白 */
+  --text: #333b40;        /* 本文：濃いグレー */
+  --text-muted: #5f6c73;
+  --text-faint: #6b787e;
+  --rule: #e2e8ea;
+  --accent: #27756c;      /* 落ち着いた青緑 */
+  --accent-dark: #1e5e57;
+  --accent-soft: #e6f1ef;
+  --shadow: 0 1px 2px rgba(45, 60, 66, .06);
+  --shadow-card: 0 1px 3px rgba(45, 60, 66, .07);
   --radius: 10px;
-  --measure: 40rem;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #16171a;
-    --bg-raised: #1e2024;
-    --text: #e4e2dd;
-    --text-muted: #a3a09a;
-    --text-faint: #7b7872;
-    --rule: #2c2f34;
-    --accent: #7fc9b8;
-    --accent-soft: #1f2a28;
-    --shadow: none;
-  }
+  --page: 60rem;          /* ページ全体の横幅 */
+  --measure: 40rem;       /* 文章を読む列の横幅 */
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -42,17 +31,39 @@ body {
   line-height: 1.95;
   letter-spacing: .015em;
   overflow-wrap: break-word;
+
+  /* 記事が少ないページでも、フッターが画面の下まで届くようにする */
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
 }
+body > main { flex: 1 0 auto; }
 
 .wrap {
   width: 100%;
-  max-width: var(--measure);
+  max-width: var(--page);
   margin: 0 auto;
   padding: 0 16px;
 }
 
+/* 文章として読む部分は、横に広がりすぎないようにそろえる */
+.list-head,
+.post-list,
+.pagination,
+.post,
+.page,
+.post-nav,
+.month-group,
+.notice,
+.tag-cloud,
+.home-profile {
+  max-width: var(--measure);
+  margin-left: auto;
+  margin-right: auto;
+}
+
 a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: .18em; }
-a:hover { text-decoration-style: dotted; }
+a:hover { color: var(--accent-dark); text-decoration-style: dotted; }
 
 .skip { position: absolute; left: -9999px; }
 .skip:focus {
@@ -68,7 +79,7 @@ a:hover { text-decoration-style: dotted; }
 
 .site-head {
   border-bottom: 1px solid var(--rule);
-  background: var(--bg);
+  background: var(--bg-raised);
   position: sticky;
   top: 0;
   z-index: 5;
@@ -99,23 +110,142 @@ a:hover { text-decoration-style: dotted; }
 .site-nav a { color: var(--text-muted); text-decoration: none; }
 .site-nav a:hover { color: var(--accent); text-decoration: underline; }
 
+/* ---- プロフィール欄 ---- */
+
+.home-profile {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-top: 32px;
+  padding: 22px 24px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-card);
+}
+.avatar {
+  flex: 0 0 auto;
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--accent-soft);
+  border: 1px solid var(--rule);
+}
+.avatar-blank {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  font-size: 1.75rem;
+  font-weight: 700;
+  line-height: 1;
+}
+.profile-body { min-width: 0; }
+.profile-name { margin: 0 0 2px; font-size: 1.0625rem; font-weight: 700; }
+.profile-text { margin: 0 0 8px; color: var(--text-muted); font-size: .9375rem; line-height: 1.8; }
+.profile-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  font-size: .875rem;
+}
+.profile-links a { text-decoration: none; }
+.profile-links a:hover { text-decoration: underline; }
+
+/* プロフィール詳細ページの先頭 */
+.page-profile-head {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin: 0 0 28px;
+}
+/* 本文用の img 指定（横幅100%）より強くして、丸いまま小さく表示する */
+.post-body .avatar {
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  margin: 0;
+}
+
+.x-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.x-link svg { width: 1em; height: 1em; fill: currentColor; }
+
+/* ---- トップページの2段組み ---- */
+
+.home-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px 40px;
+  align-items: start;
+}
+.home-main { min-width: 0; }
+.home-main .list-head,
+.home-main .post-list,
+.home-main .pagination { max-width: none; }
+
+@media (min-width: 900px) {
+  .home-grid { grid-template-columns: minmax(0, 1fr) 16rem; }
+  .home-aside { position: sticky; top: 72px; }
+}
+
+.side-box {
+  margin: 36px 0 0;
+  padding: 18px 20px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-card);
+}
+.side-title {
+  margin: 0 0 10px;
+  font-size: .8125rem;
+  font-weight: 700;
+  letter-spacing: .08em;
+  color: var(--text-faint);
+}
+.side-list { list-style: none; margin: 0; padding: 0; font-size: .9375rem; }
+.side-list > li { border-top: 1px solid var(--rule); }
+.side-list > li:first-child { border-top: 0; }
+.side-list a {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 0;
+  text-decoration: none;
+  color: var(--text);
+}
+.side-list a:hover { color: var(--accent); }
+.side-list .n { color: var(--text-faint); font-size: .8125rem; font-variant-numeric: tabular-nums; }
+.side-more { margin: 12px 0 0; font-size: .8125rem; }
+
 /* ---- 記事一覧 ---- */
 
 .list-head { padding: 40px 0 8px; }
 .list-title { margin: 0; font-size: 1.25rem; letter-spacing: .05em; }
 .list-note { margin: 8px 0 0; color: var(--text-muted); font-size: .875rem; }
 
-.post-list { list-style: none; margin: 0; padding: 0; }
-.post-list > li { border-bottom: 1px solid var(--rule); }
-.post-list > li:first-child { border-top: 1px solid var(--rule); }
+.post-list { list-style: none; margin: 0 auto; padding: 0; }
+.post-list > li {
+  margin-bottom: 12px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-card);
+}
 
 .card {
   display: block;
-  padding: 20px 2px;
+  padding: 18px 20px;
   text-decoration: none;
   color: inherit;
 }
 .card:hover .card-title { color: var(--accent); text-decoration: underline; }
+.post-list > li:hover { border-color: #cfdcda; }
 .card-meta {
   display: flex;
   flex-wrap: wrap;
@@ -151,9 +281,25 @@ a:hover { text-decoration-style: dotted; }
 }
 a.tag:hover { text-decoration: underline; }
 
+/* カテゴリーは塗り、タグは枠線にして見分けられるようにする */
+.tag-plain {
+  background: transparent;
+  border: 1px solid var(--rule);
+  color: var(--text-muted);
+}
+a.tag-plain:hover { color: var(--accent); border-color: var(--accent); }
+
 /* ---- 記事本文 ---- */
 
-.post { padding: 40px 0 8px; }
+.post,
+.page {
+  margin-top: 32px;
+  padding: 30px 26px 10px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-card);
+}
 .post-head { margin-bottom: 28px; }
 .post-meta {
   display: flex;
@@ -167,8 +313,8 @@ a.tag:hover { text-decoration: underline; }
 }
 .post-title { margin: 0; font-size: 1.5rem; font-weight: 700; line-height: 1.5; letter-spacing: .02em; }
 
-.post-body { font-size: 1.0625rem; }
-.post-body p { margin: 0 0 1.75em; }
+.post-body { font-size: 1.0625rem; line-height: 2; }
+.post-body p { margin: 0 0 1.8em; }
 .post-body h2,
 .post-body h3,
 .post-body h4 {
@@ -181,7 +327,7 @@ a.tag:hover { text-decoration: underline; }
   border-left: 3px solid var(--accent);
 }
 .post-body ul,
-.post-body ol { margin: 0 0 1.75em; padding-left: 1.4em; }
+.post-body ol { margin: 0 0 1.8em; padding-left: 1.4em; }
 .post-body li { margin-bottom: .5em; }
 .post-body figure { margin: 2em 0; }
 .post-body img {
@@ -210,11 +356,39 @@ a.tag:hover { text-decoration: underline; }
   .post-body .gallery img { aspect-ratio: auto; }
 }
 
+.post-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  max-width: var(--measure);
+  margin: 2.5em auto 0;
+  padding-top: 1.5em;
+  border-top: 1px solid var(--rule);
+}
+.post-tags-label { font-size: .75rem; color: var(--text-faint); }
+
+.tag-cloud {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 24px auto 48px;
+}
+.tag-cloud .tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 13px;
+  font-size: .875rem;
+  background: var(--bg-raised);
+}
+.tag-count { color: var(--text-faint); font-size: .75rem; }
+
 .post-nav {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
-  margin: 8px 0 56px;
+  margin: 8px auto 56px;
   padding-top: 24px;
   border-top: 1px solid var(--rule);
   font-size: .9375rem;
@@ -248,7 +422,7 @@ a.tag:hover { text-decoration: underline; }
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin: 32px 0 56px;
+  margin: 24px auto 56px;
   font-size: .9375rem;
 }
 .pagination a {
@@ -263,7 +437,7 @@ a.tag:hover { text-decoration: underline; }
 
 /* ---- 年月ごとの見出し（全記事一覧） ---- */
 
-.month-group { margin: 36px 0 0; }
+.month-group { margin: 36px auto 0; scroll-margin-top: 72px; }
 .month-head {
   margin: 0 0 4px;
   font-size: .9375rem;
@@ -292,12 +466,12 @@ a.tag:hover { text-decoration: underline; }
 /* ---- 転送ページ・404 ---- */
 
 .notice {
-  margin: 72px 0;
+  margin: 72px auto;
   padding: 28px 24px;
   border: 1px solid var(--rule);
   border-radius: var(--radius);
   background: var(--bg-raised);
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-card);
 }
 .notice h1 { margin: 0 0 .7em; font-size: 1.1875rem; line-height: 1.6; }
 .notice p { margin: 0 0 1em; }
@@ -311,8 +485,7 @@ a.tag:hover { text-decoration: underline; }
   font-weight: 700;
   text-decoration: none;
 }
-@media (prefers-color-scheme: dark) { .button { color: #14201e; } }
-.button:hover { opacity: .88; text-decoration: none; }
+.button:hover { background: var(--accent-dark); color: #fff; text-decoration: none; }
 
 /* ---- フッター ---- */
 
@@ -320,6 +493,7 @@ a.tag:hover { text-decoration: underline; }
   margin-top: 40px;
   padding: 28px 0 44px;
   border-top: 1px solid var(--rule);
+  background: var(--bg-raised);
   color: var(--text-muted);
   font-size: .875rem;
 }
@@ -336,10 +510,20 @@ a.tag:hover { text-decoration: underline; }
   .post-body { font-size: 1.09375rem; }
 }
 
+/* ---- 画面がせまいとき ---- */
+
+@media (max-width: 519px) {
+  .home-profile { flex-direction: column; align-items: flex-start; gap: 14px; }
+  .avatar { width: 64px; height: 64px; }
+  .post, .page { padding: 24px 18px 8px; }
+  .card { padding: 16px 16px; }
+}
+
 /* ---- 印刷 ---- */
 
 @media print {
-  .site-head, .site-nav, .post-nav, .pagination, .site-foot, .skip { display: none; }
+  .site-head, .site-nav, .post-nav, .pagination, .site-foot, .skip,
+  .home-aside, .home-profile { display: none; }
   body { background: #fff; color: #000; font-size: 11pt; }
   .post-body img { max-width: 100%; }
 }

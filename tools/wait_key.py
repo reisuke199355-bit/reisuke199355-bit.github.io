@@ -8,6 +8,7 @@ BAT 側は英数字だけにして、画面に出す日本語はすべて Python
     python wait_key.py            終了の案内だけ
     python wait_key.py preview    「次はプレビュー」の案内を添える
     python wait_key.py publish    「次は公開」の案内を添える
+    python wait_key.py image      「画像を設定した」案内を添える
     python wait_key.py error      失敗したときの案内
 """
 import io
@@ -19,6 +20,8 @@ MESSAGES = {
     "preview": "取り込みとサイトの作り直しが終わりました。\n"
                "次は「2_プレビュー.bat」を開いて、表示を確認してください。",
     "publish": "表示に問題がなければ「3_GitHubへ公開.bat」で公開できます。",
+    "image": "プロフィール画像の設定とサイトの作り直しが終わりました。\n"
+             "次は「2_プレビュー.bat」を開いて、表示を確認してください。",
     "error": "エラーが起きたため中断しました。上に出ている内容を確認してください。\n"
              "python が見つからない場合は、Python のインストールを確認してください。",
 }

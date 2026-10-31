@@ -11,7 +11,7 @@
 | `templates/` | ページの型 |
 | `tools/` | 変換・生成・公開のスクリプト（Python 3、追加のインストール不要） |
 | `docs/` | **公開されるサイト本体**（自動生成。直接編集しない） |
-| `config.json` | サイト名、URL、カテゴリー名などの設定 |
+| `config.json` | サイト名、URL、カテゴリー・タグの URL 名などの設定 |
 
 ## スクリプト
 
@@ -19,7 +19,7 @@
 |---|---|
 | `python tools/build.py` | `content/` から `docs/` を組み立てる |
 | `python tools/preview.py` | `docs/` をローカルサーバーで表示する |
-| `python tools/import_txt.py` | 下書きフォルダの TXT を記事として取り込む |
+| `python tools/import_txt.py` | 記事管理フォルダの TXT を記事として取り込む（フォルダ名＝カテゴリー） |
 | `python tools/publish.py` | 確認のうえ GitHub へ送信する |
 | `python tools/wp_import.py` | WordPress の XML から取り込む（移行時に1回だけ使用） |
 

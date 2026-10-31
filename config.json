@@ -9,6 +9,8 @@
   "base_path": "/",
   "posts_per_page": 20,
   "sort_by": "post_date",
+  "articles_dir": "../10_記事管理",
+  "default_category": "日記",
   "legacy_slug_map": {
     "7": "hello-world",
     "14": "circleback-review"
@@ -18,24 +20,53 @@
     "お知らせ": "news",
     "感想": "review"
   },
+  "tag_slug_map": {},
   "nav": [
+    {
+      "label": "ホーム",
+      "href": ""
+    },
     {
       "label": "日記",
       "href": "archive/"
+    },
+    {
+      "label": "カテゴリー",
+      "href": "categories/"
     },
     {
       "label": "プロフィール",
       "href": "profile/"
     },
     {
-      "label": "このサイト",
-      "href": "about/"
+      "label": "X",
+      "social": "x"
     }
   ],
   "footer_nav": [
     {
+      "label": "タグ一覧",
+      "href": "tags/"
+    },
+    {
       "label": "プライバシーポリシー",
       "href": "privacy/"
     }
-  ]
+  ],
+  "social": {
+    "x": "https://x.com/WNYtyenKL774643"
+  },
+  "social_hidden": [
+    "x"
+  ],
+  "profile": {
+    "name": "れいすけ",
+    "tagline": "ゲーム制作とAI、そして日々の記録。",
+    "image": "images/profile.png",
+    "link": "profile/"
+  },
+  "home": {
+    "recent_posts": 10,
+    "show_months": 12
+  }
 }

@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import urllib.parse
 import html as htmllib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -75,16 +76,44 @@ def write_entry(path, meta, body):
 
 
 def load_posts():
-    """content/posts の全記事を読み込んで、設定の並び順で返す。"""
+    """content/posts の全記事を読み込んで、設定の並び順で返す。
+
+    カテゴリー別のサブフォルダに置かれた記事も読む。
+    """
     cfg = load_config()
     posts = []
-    for name in sorted(os.listdir(CONTENT_POSTS)):
-        if name.endswith(".html"):
-            posts.append(read_entry(os.path.join(CONTENT_POSTS, name)))
+    for folder, dirs, names in os.walk(CONTENT_POSTS):
+        dirs.sort()
+        for name in sorted(names):
+            if name.endswith(".html"):
+                posts.append(read_entry(os.path.join(folder, name)))
     key = (lambda p: p.get("date", "")) if cfg.get("sort_by") == "post_date" \
         else (lambda p: (p.get("diary_date") or p.get("date", ""))[:10])
     posts.sort(key=key)
     return posts
+
+
+def url_name(name, mapping):
+    """カテゴリー名・タグ名から、URL に使う名前を決める。
+
+    設定にアルファベットの名前があればそれを使い、無ければ日本語のまま使う。
+    日本語のフォルダ名は GitHub Pages でもそのまま使える（旧URLの転送ページで実証済み）。
+    """
+    name = (name or "").strip()
+    if not name:
+        return ""
+    mapped = (mapping or {}).get(name)
+    if mapped:
+        return mapped.strip("/")
+    # URL やファイル名に使えない文字だけは避ける
+    for bad in r'\/:*?"<>|':
+        name = name.replace(bad, "-")
+    return name.strip(". ")
+
+
+def quote_path(path):
+    """リンクに書くときの文字列。日本語などはパーセントエンコードする。"""
+    return "/".join(urllib.parse.quote(part) for part in (path or "").split("/"))
 
 
 def esc(s):

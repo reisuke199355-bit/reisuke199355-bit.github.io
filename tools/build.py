@@ -53,6 +53,7 @@ class Site:
         self.site_url = (self.cfg.get("site_url") or "").rstrip("/")
         self.base = tpl("base.html")
         self.posts = list(reversed(common.load_posts()))  # 新しい記事が先
+        self.has_tags = any(self.visible_tags(p) for p in self.posts)
         self.pages = []
         if os.path.isdir(common.CONTENT_PAGES):
             for name in sorted(os.listdir(common.CONTENT_PAGES)):
@@ -64,14 +65,78 @@ class Site:
     def root_for(self, depth):
         return common.relpath_prefix(depth)
 
+    def social_url(self, key):
+        """X などの外部サービスのURL。設定ファイル1か所で管理する。
+
+        config.json の social_hidden に名前を入れておくと、URL は残したまま
+        リンクだけ画面に出さない（アカウント凍結中などの一時的な非表示用）。
+        """
+        if key in (self.cfg.get("social_hidden") or []):
+            return ""
+        return (self.cfg.get("social", {}).get(key) or "").strip()
+
     def nav_html(self, root):
-        return "".join('<a href="%s%s">%s</a>' % (root, n["href"], common.esc(n["label"]))
-                       for n in self.cfg.get("nav", []))
+        out = []
+        for n in self.cfg.get("nav", []):
+            if n.get("social"):
+                url = self.social_url(n["social"])
+                if not url:
+                    continue
+                out.append('<a href="%s" target="_blank" rel="noopener noreferrer">%s</a>'
+                           % (common.esc(url), common.esc(n["label"])))
+            else:
+                out.append('<a href="%s%s">%s</a>'
+                           % (root, n.get("href", ""), common.esc(n["label"])))
+        return "".join(out)
+
+    X_ICON = ('<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18.244 2.25h3.308'
+              'l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835'
+              'L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>')
+
+    def x_link(self, label="X でのつぶやき"):
+        url = self.social_url("x")
+        if not url:
+            return ""
+        return ('<a class="x-link" href="%s" target="_blank" rel="noopener noreferrer">'
+                '%s<span>%s</span></a>' % (common.esc(url), self.X_ICON, common.esc(label)))
+
+    def avatar_html(self, root):
+        """プロフィール画像。用意されていなければ頭文字の仮アイコンを出す。"""
+        prof = self.cfg.get("profile", {})
+        rel = (prof.get("image") or "").lstrip("/")
+        name = prof.get("name") or self.cfg["site_title"]
+        if rel and os.path.isfile(os.path.join(common.DOCS, rel.replace("/", os.sep))):
+            return ('<img class="avatar" src="%s%s" width="76" height="76" alt="%s のプロフィール画像">'
+                    % (root, common.quote_path(rel), common.esc(name)))
+        return ('<span class="avatar avatar-blank" aria-hidden="true">%s</span>'
+                % common.esc(name[:1]))
+
+    def profile_block(self, root):
+        """トップページのプロフィール紹介欄。"""
+        prof = self.cfg.get("profile", {})
+        name = prof.get("name") or self.cfg["site_title"]
+        links = []
+        if prof.get("link"):
+            links.append('<a href="%s%s">くわしいプロフィール</a>' % (root, prof["link"]))
+        x = self.x_link("Xのプロフィール")
+        if x:
+            links.append(x)
+        return ('<section class="home-profile">%s<div class="profile-body">'
+                '<p class="profile-name">%s</p><p class="profile-text">%s</p>'
+                '<p class="profile-links">%s</p></div></section>'
+                % (self.avatar_html(root), common.esc(name),
+                   common.esc(prof.get("tagline", "")), "".join(links)))
 
     def footer_nav_html(self, root):
-        """フッターに並べるリンク（プライバシーポリシーなど）。"""
+        """フッターに並べるリンク（タグ一覧・プライバシーポリシーなど）。
+
+        タグの付いた記事が1件も無いときは、タグ一覧へのリンクを出さない
+        （ページ自体を作らないので、リンク切れになってしまうため）。
+        """
+        items = [n for n in self.cfg.get("footer_nav", [])
+                 if n.get("href") != "tags/" or self.has_tags]
         return "".join(' ・ <a href="%s%s">%s</a>' % (root, n["href"], common.esc(n["label"]))
-                       for n in self.cfg.get("footer_nav", []))
+                       for n in items)
 
     def feed_bits(self, root):
         if not self.site_url:
@@ -107,18 +172,55 @@ class Site:
         write(rel_out, html)
 
     def cat_slug(self, name):
-        return self.cfg.get("category_slug_map", {}).get(name)
+        """カテゴリーの URL 名。設定になければ日本語のフォルダ名をそのまま使う。"""
+        return common.url_name(name, self.cfg.get("category_slug_map", {}))
 
-    def cat_links(self, categories, root):
+    def tag_slug(self, name):
+        """タグの URL 名。設定になければ日本語のタグ名をそのまま使う。"""
+        return common.url_name(name, self.cfg.get("tag_slug_map", {}))
+
+    def chips(self, names, root, kind, link=True):
+        """カテゴリー名・タグ名を小さな見出しとして並べる。
+
+        link=False のときはリンクにしない。一覧のカードは全体がリンクなので、
+        その中にリンクを入れると入れ子になり、ブラウザがカードを途中で
+        打ち切ってしまう（タイトルが押せなくなる）ため。
+        """
+        folder, cls = ("categories", "tag") if kind == "category" else ("tags", "tag tag-plain")
+        slug_of = self.cat_slug if kind == "category" else self.tag_slug
         out = []
-        for name in categories:
-            slug = self.cat_slug(name)
-            if slug:
-                out.append('<a class="tag" href="%scategories/%s/">%s</a>'
-                           % (root, slug, common.esc(name)))
+        for name in names:
+            slug = slug_of(name)
+            if link and slug:
+                out.append('<a class="%s" href="%s%s/%s/">%s</a>'
+                           % (cls, root, folder, common.quote_path(slug), common.esc(name)))
             else:
-                out.append('<span class="tag">%s</span>' % common.esc(name))
+                out.append('<span class="%s">%s</span>' % (cls, common.esc(name)))
         return "".join(out)
+
+    def visible_tags(self, post):
+        """画面に出すタグ。
+
+        カテゴリーと同じ名前のタグは、同じ言葉が二度並ぶだけなので出さない。
+        記事ファイルのほうは書き換えず、表示のときだけ取り除いている。
+        あとから足したカテゴリーにも、そのまま同じ決まりが効く。
+        """
+        cats = set(post.get("categories", []))
+        return [t for t in post.get("tags", []) if t not in cats]
+
+    def tag_row(self, post, root):
+        """記事ページの下に出すタグの行。出すタグが無ければ何も出さない。"""
+        chips = self.tag_links(self.visible_tags(post), root)
+        if not chips:
+            return ""
+        return ('<p class="post-tags"><span class="post-tags-label">タグ</span>%s</p>'
+                % chips)
+
+    def cat_links(self, categories, root, link=True):
+        return self.chips(categories, root, "category", link)
+
+    def tag_links(self, tags, root, link=True):
+        return self.chips(tags, root, "tag", link)
 
     def excerpt(self, post, limit=110):
         text = common.strip_tags(post.get("_body", ""))
@@ -131,11 +233,51 @@ class Site:
             '<span class="card-title">%s</span>'
             '<span class="card-excerpt">%s</span>'
             "</a></li>"
-            % (root, post["slug"],
+            % (root, common.quote_path(post["slug"]),
                post["date"][:10], common.format_date_ja(post["date"]),
-               self.cat_links(post.get("categories", []), root),
+               self.cat_links(post.get("categories", []), root, link=False),
                common.esc(post["title"]), common.esc(self.excerpt(post)))
         )
+
+    def month_groups(self):
+        """投稿月ごとに記事をまとめる（新しい順）。"""
+        groups = []
+        for post in self.posts:
+            key = post["date"][:7]
+            if not groups or groups[-1][0] != key:
+                groups.append((key, []))
+            groups[-1][1].append(post)
+        return groups
+
+    def category_counts(self):
+        buckets = {}
+        for post in self.posts:
+            for name in post.get("categories", []):
+                buckets.setdefault(name, []).append(post)
+        return sorted(buckets.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+
+    def aside_html(self, root):
+        """トップページの横（スマホでは下）に並べる、カテゴリーと月別の案内。"""
+        cats = "".join(
+            '<li><a href="%scategories/%s/"><span>%s</span><span class="n">%d</span></a></li>'
+            % (root, common.quote_path(self.cat_slug(name)), common.esc(name), len(items))
+            for name, items in self.category_counts() if self.cat_slug(name))
+        box_cats = ('<section class="side-box"><h2 class="side-title">カテゴリー</h2>'
+                    '<ul class="side-list">%s</ul>'
+                    '<p class="side-more"><a href="%scategories/">カテゴリー一覧へ</a></p>'
+                    '</section>' % (cats, root))
+
+        limit = int(self.cfg.get("home", {}).get("show_months", 12))
+        groups = self.month_groups()
+        months = "".join(
+            '<li><a href="%sarchive/#%s"><span>%d年%d月</span>'
+            '<span class="n">%d</span></a></li>'
+            % (root, key, int(key[:4]), int(key[5:7]), len(items))
+            for key, items in groups[:limit])
+        more = ('<p class="side-more"><a href="%sarchive/">すべての月を見る</a></p>' % root)             if len(groups) > limit else             ('<p class="side-more"><a href="%sarchive/">全記事一覧へ</a></p>' % root)
+        box_months = ('<section class="side-box"><h2 class="side-title">月別アーカイブ</h2>'
+                      '<ul class="side-list">%s</ul>%s</section>' % (months, more))
+        return box_cats + box_months
 
     # ---- 各ページ ----
 
@@ -144,6 +286,7 @@ class Site:
         total = len(self.posts)
         pages = max(1, (total + per - 1) // per)
         list_tpl = tpl("list.html")
+        home_tpl = tpl("home.html")
 
         for i in range(pages):
             chunk = self.posts[i * per:(i + 1) * per]
@@ -168,13 +311,18 @@ class Site:
             else:
                 links.append("<span></span>")
 
-            body = render(
+            inner = render(
                 list_tpl,
-                list_title="日記" if i == 0 else "日記（%d ページ目）" % (i + 1),
-                list_note='<p class="list-note">%s</p>' % common.esc(self.cfg["site_description"])
-                if i == 0 else "",
+                list_title="新着記事" if i == 0 else "新着記事（%d ページ目）" % (i + 1),
+                list_note="",
                 items="\n".join(self.card(p, root) for p in chunk),
                 pagination='<nav class="pagination">%s</nav>' % "".join(links) if pages > 1 else "",
+            )
+            body = render(
+                home_tpl,
+                profile=self.profile_block(root) if i == 0 else "",
+                list=inner,
+                aside=self.aside_html(root),
             )
             title = self.cfg["site_title"] if i == 0 else \
                 "%s - %d ページ目" % (self.cfg["site_title"], i + 1)
@@ -184,9 +332,12 @@ class Site:
 
     def build_posts(self):
         post_tpl = tpl("post.html")
-        root = self.root_for(2)
         n = len(self.posts)
         for i, post in enumerate(self.posts):
+            # カテゴリー別のサブフォルダに入る記事は 1 階層深くなる
+            rel_url = "posts/%s/" % post["slug"]
+            depth = rel_url.count("/")
+            root = self.root_for(depth)
             newer = self.posts[i - 1] if i > 0 else None   # 一覧は新しい順
             older = self.posts[i + 1] if i + 1 < n else None
             prev_link = next_link = ""
@@ -194,24 +345,26 @@ class Site:
                 prev_link = ('<a class="prev" href="%sposts/%s/">'
                              '<span class="dir">前の記事</span>'
                              '<span class="label">%s</span></a>'
-                             % (root, older["slug"], common.esc(older["title"])))
+                             % (root, common.quote_path(older["slug"]),
+                                common.esc(older["title"])))
             if newer:
                 next_link = ('<a class="next" href="%sposts/%s/">'
                              '<span class="dir">次の記事</span>'
                              '<span class="label">%s</span></a>'
-                             % (root, newer["slug"], common.esc(newer["title"])))
+                             % (root, common.quote_path(newer["slug"]),
+                                common.esc(newer["title"])))
             body = render(
                 post_tpl,
                 title=common.esc(post["title"]),
                 date_iso=post["date"][:10],
                 date_label=common.format_date_ja(post["date"]),
                 category_links=self.cat_links(post.get("categories", []), root),
+                tag_links=self.tag_row(post, root),
                 body=post["_body"],
                 prev_link=prev_link,
                 next_link=next_link,
             )
-            rel_url = "posts/%s/" % post["slug"]
-            self.shell(rel_url + "index.html", 2,
+            self.shell(rel_url + "index.html", depth,
                        "%s - %s" % (post["title"], self.cfg["site_title"]),
                        self.excerpt(post, 100), body,
                        og_type="article", canonical_url=rel_url)
@@ -230,12 +383,13 @@ class Site:
             year, month = key.split("-")
             rows = "".join(
                 '<li><span class="d">%d/%d</span><a href="%sposts/%s/">%s</a></li>'
-                % (int(p["date"][5:7]), int(p["date"][8:10]), root, p["slug"],
-                   common.esc(p["title"]))
+                % (int(p["date"][5:7]), int(p["date"][8:10]), root,
+                   common.quote_path(p["slug"]), common.esc(p["title"]))
                 for p in items)
-            chunks.append('<section class="month-group"><h2 class="month-head">%d年%d月'
-                          '（%d件）</h2><ul class="compact">%s</ul></section>'
-                          % (int(year), int(month), len(items), rows))
+            chunks.append('<section class="month-group" id="%s">'
+                          '<h2 class="month-head">%d年%d月（%d件）</h2>'
+                          '<ul class="compact">%s</ul></section>'
+                          % (key, int(year), int(month), len(items), rows))
         body = ('<div class="list-head"><h1 class="list-title">全記事一覧</h1>'
                 '<p class="list-note">全 %d 記事。投稿日の新しい順に並んでいます。</p></div>%s'
                 % (len(self.posts), "".join(chunks)))
@@ -254,7 +408,7 @@ class Site:
         for name, items in sorted(buckets.items(), key=lambda kv: -len(kv[1])):
             slug = self.cat_slug(name)
             if not slug:
-                print("  [注意] カテゴリー「%s」はURL用の名前が未設定のため作成しません。" % name)
+                print("  [注意] カテゴリー「%s」はURLに使える名前になりません。" % name)
                 continue
             body = render(
                 tpl("list.html"),
@@ -271,10 +425,85 @@ class Site:
             count += 1
         print("  カテゴリー: %d ページ" % count)
 
+    def build_category_index(self):
+        """カテゴリーの総合ページ。ナビの「カテゴリー」から開く。"""
+        root = self.root_for(1)
+        rows = "".join(
+            '<li><a href="%scategories/%s/"><span>%s</span><span class="n">%d 記事</span></a></li>'
+            % (root, common.quote_path(self.cat_slug(name)), common.esc(name), len(items))
+            for name, items in self.category_counts() if self.cat_slug(name))
+        body = ('<div class="list-head"><h1 class="list-title">カテゴリー一覧</h1>'
+                '<p class="list-note">%d 種類のカテゴリーがあります。</p></div>'
+                '<section class="side-box"><ul class="side-list">%s</ul></section>'
+                % (len(self.category_counts()), rows))
+        self.shell("categories/index.html", 1,
+                   "カテゴリー一覧 - %s" % self.cfg["site_title"],
+                   "カテゴリーの一覧。", body, canonical_url="categories/")
+        print("  カテゴリー一覧: 1 ページ")
+
+    def build_tags(self):
+        """タグごとの一覧と、タグの総合ページを作る。タグが1つも無ければ作らない。"""
+        buckets = {}
+        for post in self.posts:
+            for name in self.visible_tags(post):
+                buckets.setdefault(name, []).append(post)
+        if not buckets:
+            print("  タグ: 0 ページ（タグの付いた記事がありません）")
+            return
+
+        root = self.root_for(2)
+        count = 0
+        for name, items in sorted(buckets.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+            slug = self.tag_slug(name)
+            if not slug:
+                print("  [注意] タグ「%s」はURLに使える名前になりません。" % name)
+                continue
+            body = render(
+                tpl("list.html"),
+                list_title="タグ：%s" % common.esc(name),
+                list_note='<p class="list-note">%d 記事　<a href="%s">タグ一覧へ</a></p>'
+                          % (len(items), root + "tags/"),
+                items="\n".join(self.card(p, root) for p in items),
+                pagination="",
+            )
+            rel_url = "tags/%s/" % slug
+            self.shell(rel_url + "index.html", 2,
+                       "%s - %s" % (name, self.cfg["site_title"]),
+                       "タグ「%s」の記事 %d 件。" % (name, len(items)), body,
+                       canonical_url=rel_url)
+            count += 1
+
+        # タグの総合ページ
+        inner = self.root_for(1)
+        chips = "".join(
+            '<a class="tag tag-plain" href="%s%s/"><span>%s</span>'
+            '<span class="tag-count">%d</span></a>'
+            % (inner + "tags/", common.quote_path(self.tag_slug(name)),
+               common.esc(name), len(items))
+            for name, items in sorted(buckets.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+            if self.tag_slug(name))
+        body = ('<div class="list-head"><h1 class="list-title">タグ一覧</h1>'
+                '<p class="list-note">%d 種類のタグがあります。</p></div>'
+                '<div class="tag-cloud">%s</div>' % (len(buckets), chips))
+        self.shell("tags/index.html", 1, "タグ一覧 - %s" % self.cfg["site_title"],
+                   "記事に付けたタグの一覧。", body, canonical_url="tags/")
+        print("  タグ: %d ページ（総合ページを含めて %d 枚）" % (count, count + 1))
+
     def build_pages(self):
         page_tpl = tpl("page.html")
+        profile_slug = (self.cfg.get("profile", {}).get("link") or "").strip("/")
         for page in self.pages:
-            body = render(page_tpl, title=common.esc(page["title"]), body=page["_body"])
+            inner = page["_body"]
+            if page["slug"] == profile_slug:
+                root = self.root_for(1)
+                x = self.x_link("X を見る")
+                inner = ('<div class="page-profile-head">%s<div class="profile-body">'
+                         '<p class="profile-name">%s</p>'
+                         '<p class="profile-links">%s</p></div></div>%s'
+                         % (self.avatar_html(root),
+                            common.esc(self.cfg.get("profile", {}).get("name") or ""),
+                            x, inner))
+            body = render(page_tpl, title=common.esc(page["title"]), body=inner)
             rel_url = "%s/" % page["slug"]
             self.shell(rel_url + "index.html", 1,
                        "%s - %s" % (page["title"], self.cfg["site_title"]),
@@ -328,21 +557,15 @@ class Site:
 <title>ページが見つかりません - %(site)s</title>
 <meta name="robots" content="noindex">
 <style>
-body{margin:0;background:#fcfbf8;color:#272523;font-family:"Hiragino Kaku Gothic ProN","Yu Gothic UI","Noto Sans JP",system-ui,sans-serif;line-height:1.95}
+body{margin:0;background:#f3f5f6;color:#333b40;font-family:"Hiragino Kaku Gothic ProN","Yu Gothic UI","Noto Sans JP",system-ui,sans-serif;line-height:1.95}
 main{max-width:40rem;margin:0 auto;padding:72px 16px}
-.notice{padding:28px 24px;border:1px solid #e6e2da;border-radius:10px;background:#fff}
+.notice{padding:28px 24px;border:1px solid #e2e8ea;border-radius:10px;background:#fff;box-shadow:0 1px 3px rgba(45,60,66,.07)}
 h1{margin:0 0 .7em;font-size:1.1875rem;line-height:1.6}
 p{margin:0 0 1em}
-a{color:#2f6d62;text-underline-offset:.18em}
-a.button{display:inline-block;padding:10px 20px;border-radius:10px;background:#2f6d62;color:#fff;font-weight:700;text-decoration:none}
-.sub{margin:0;color:#6b6760;font-size:.875rem}
-@media (prefers-color-scheme:dark){
-body{background:#16171a;color:#e4e2dd}
-.notice{background:#1e2024;border-color:#2c2f34}
-a{color:#7fc9b8}
-a.button{background:#7fc9b8;color:#14201e}
-.sub{color:#a3a09a}
-}
+a{color:#27756c;text-underline-offset:.18em}
+a.button{display:inline-block;padding:10px 20px;border-radius:10px;background:#27756c;color:#fff;font-weight:700;text-decoration:none}
+a.button:hover{background:#1e5e57}
+.sub{margin:0;color:#5f6c73;font-size:.875rem}
 </style>
 </head>
 <body>
@@ -376,7 +599,7 @@ a.button{background:#7fc9b8;color:#14201e}
 
         items = []
         for post in self.posts[:30]:
-            url = "%s/posts/%s/" % (self.site_url, post["slug"])
+            url = "%s/posts/%s/" % (self.site_url, common.quote_path(post["slug"]))
             items.append(
                 "<item><title>%s</title><link>%s</link><guid isPermaLink=\"true\">%s</guid>"
                 "<pubDate>%s</pubDate><description>%s</description></item>"
@@ -390,15 +613,22 @@ a.button{background:#7fc9b8;color:#14201e}
               % (common.esc(self.cfg["site_title"]), self.site_url,
                  common.esc(self.cfg["site_description"]), "".join(items)))
 
+        cats, tags = set(), set()
+        for post in self.posts:
+            cats.update(post.get("categories", []))
+            tags.update(self.visible_tags(post))
         urls = ["", "archive/"]
         urls += ["posts/%s/" % p["slug"] for p in self.posts]
         urls += ["%s/" % p["slug"] for p in self.pages]
-        urls += ["categories/%s/" % self.cat_slug(c) for c in self.cfg.get("category_slug_map", {})
-                 if self.cat_slug(c)]
+        urls += ["categories/%s/" % self.cat_slug(c) for c in sorted(cats) if self.cat_slug(c)]
+        if tags:
+            urls += ["tags/"]
+            urls += ["tags/%s/" % self.tag_slug(t) for t in sorted(tags) if self.tag_slug(t)]
         write("sitemap.xml",
               '<?xml version="1.0" encoding="UTF-8"?>\n'
               '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">%s</urlset>\n'
-              % "".join("<url><loc>%s/%s</loc></url>" % (self.site_url, u) for u in urls))
+              % "".join("<url><loc>%s/%s</loc></url>"
+                        % (self.site_url, common.quote_path(u)) for u in urls))
         print("  feed.xml と sitemap.xml: 作成しました（%s）" % self.site_url)
 
     def build(self):
@@ -409,6 +639,8 @@ a.button{background:#7fc9b8;color:#14201e}
         self.build_posts()
         self.build_archive()
         self.build_categories()
+        self.build_category_index()
+        self.build_tags()
         self.build_pages()
         self.build_redirects()
         self.build_404()
