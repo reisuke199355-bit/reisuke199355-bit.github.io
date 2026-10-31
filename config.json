@@ -1,0 +1,35 @@
+{
+  "site_title": "れいすけの日常の記録",
+  "site_description": "日々の出来事や考えの記録",
+  "author": "れいすけ",
+  "lang": "ja",
+  "timezone": "+09:00",
+  "legacy_site_url": "https://reisuke-ambition.com",
+  "site_url": "https://reisuke199355-bit.github.io",
+  "base_path": "/",
+  "posts_per_page": 20,
+  "sort_by": "post_date",
+  "legacy_slug_map": {
+    "7": "hello-world",
+    "14": "circleback-review"
+  },
+  "category_slug_map": {
+    "日記": "diary",
+    "お知らせ": "news",
+    "感想": "review"
+  },
+  "nav": [
+    {
+      "label": "日記",
+      "href": "archive/"
+    },
+    {
+      "label": "プロフィール",
+      "href": "profile/"
+    },
+    {
+      "label": "このサイト",
+      "href": "about/"
+    }
+  ]
+}

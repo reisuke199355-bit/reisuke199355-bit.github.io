@@ -1,0 +1,27 @@
+# 公開リポジトリに入れてはいけないもの
+# （バックアップ類は blog フォルダの外にあるため、本来ここには入らない。
+#   取り違えて置いてしまった場合の保険として重ねて指定している。）
+
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.gz
+*.sql
+*.env
+*.pem
+*.key
+WordPress*.xml
+wp-content*
+00_Backup/
+01_Analysis/
+10_下書き/
+
+# 作業中に出るもの
+.build-manifest.json
+__pycache__/
+*.pyc
+Thumbs.db
+desktop.ini
+.DS_Store
