@@ -12,7 +12,6 @@
 
 元の画像ファイルには手を触れない。
 """
-import io
 import json
 import os
 import shutil
@@ -22,7 +21,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import common
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+common.use_utf8_stdout()
 
 SIZE = 320                      # 表示は76pxなので、画面が高精細でも足りる大きさ
 OUT_REL = "images/profile"      # 拡張子はあとで付ける

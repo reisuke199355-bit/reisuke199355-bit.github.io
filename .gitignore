@@ -17,12 +17,34 @@ wp-content*
 00_Backup/
 01_Analysis/
 10_下書き/
+20_素材/
+*.pfx
+*.p12
+*.crt
+*.cer
+*.ppk
+id_rsa*
+.env
+.env.*
+secrets.*
+token.json
+tokens.json
+credentials.json
+*.db
+*.sqlite
+*.sqlite3
+*.docx
+*.odt
+*.xlsx
 
 # 作業中に出るもの
 .build-manifest.json
+.baseline-unlock
 __pycache__/
 *.pyc
 Thumbs.db
 desktop.ini
 .DS_Store
 *.bak
+*.orig
+*.tmp

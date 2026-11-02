@@ -4,26 +4,30 @@
 使い方:
     python build.py
 
-生成したファイルは docs/.build-manifest.json に記録し、次回のビルドで
-不要になったものだけを消す。docs/images と docs/assets には手を触れない。
+生成したファイルの一覧は、リポジトリ直下の .build-manifest.json に記録し、
+次回のビルドで不要になったものだけを消す（この控えは GitHub へ送らない）。
+docs/images と docs/assets には手を触れない。
 """
 import datetime
-import io
 import json
 import os
 import re
 import shutil
 import sys
-import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import common
+import rules
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+common.use_utf8_stdout()
 
 MANIFEST = os.path.join(common.ROOT, ".build-manifest.json")
 FORBIDDEN = set('\\/:*?"<>|')
 written_files = []
+# 「出力先 -> それを作ろうとした相手」の控え。二重書き込みを見つけるために使う。
+written_by = {}
+
+PLACEHOLDER = re.compile(r"\{\{(\w+)\}\}")
 
 
 def tpl(name):
@@ -32,15 +36,47 @@ def tpl(name):
 
 
 def render(template, **kw):
-    out = template
-    for key, value in kw.items():
-        out = out.replace("{{%s}}" % key, "" if value is None else str(value))
-    return re.sub(r"\{\{\w+\}\}", "", out)
+    """型の {{名前}} を値に差し替える。
+
+    型の中だけを1回見て差し替える。差し込んだ値の中をもう一度見ないので、
+    記事の本文に {{...}} と書かれていても、それが消えたり差し替わったりしない。
+    （以前は値を入れたあとに全体から {{語}} を消していたため、本文の
+      {{...}} が黙って消えてしまっていた）
+    """
+    def pick(m):
+        key = m.group(1)
+        if key not in kw:
+            return ""              # 型に残った差し込み記号は空にする
+        value = kw[key]
+        return "" if value is None else str(value)
+    return PLACEHOLDER.sub(pick, template)
 
 
-def write(rel_path, text):
-    """docs/ 以下へ書き出し、生成物として記録する。"""
-    abs_path = os.path.join(common.DOCS, rel_path.replace("/", os.sep))
+def write(rel_path, text, made_by=""):
+    """docs/ 以下へ書き出し、生成物として記録する。
+
+    公開フォルダの外へ出ないこと、同じ場所へ2回書かないことを必ず確かめる。
+    2回書きを止めるのが大事で、旧URLの転送ページと生成ページがぶつかっても、
+    これまでは後から書いたほうが黙って勝っていた。
+    """
+    docs_real = os.path.realpath(common.DOCS)
+    abs_path = os.path.realpath(os.path.join(common.DOCS, rel_path.replace("/", os.sep)))
+    if abs_path != docs_real and not abs_path.startswith(docs_real + os.sep):
+        print("\n*** 中断します：公開フォルダの外へ書き出そうとしました ***")
+        print("    書き出し先: %s" % rel_path)
+        print("    記事の URL（slug）や旧URLに「..」や円記号が入っていないか"
+              "確かめてください。")
+        raise SystemExit(1)
+    key = rel_path.replace("\\", "/").lower()
+    if key in written_by:
+        print("\n*** 中断します：同じ場所へ2回書き出そうとしました ***")
+        print("    場所: docs/%s" % rel_path)
+        print("    1回目: %s" % written_by[key])
+        print("    2回目: %s" % (made_by or "(不明)"))
+        print("    どちらかの名前が重なっています。"
+              "カテゴリー名・記事の URL・旧URL を見直してください。")
+        raise SystemExit(1)
+    written_by[key] = made_by or rel_path
     os.makedirs(os.path.dirname(abs_path), exist_ok=True)
     with open(abs_path, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
@@ -152,7 +188,7 @@ class Site:
         return '<link rel="canonical" href="%s/%s">\n' % (self.site_url, rel_url.lstrip("/"))
 
     def shell(self, rel_out, depth, page_title, description, content,
-              og_type="website", canonical_url=None):
+              og_type="website", canonical_url=None, made_by=None):
         root = self.root_for(depth)
         feed_link, feed_foot = self.feed_bits(root)
         html = render(
@@ -169,7 +205,7 @@ class Site:
             feed_foot=feed_foot,
             footer_nav=self.footer_nav_html(root),
         )
-        write(rel_out, html)
+        write(rel_out, html, made_by=made_by or ("ページ「%s」" % page_title))
 
     def cat_slug(self, name):
         """カテゴリーの URL 名。設定になければ日本語のフォルダ名をそのまま使う。"""
@@ -512,24 +548,24 @@ class Site:
         print("  固定ページ: %d 件" % len(self.pages))
 
     def build_redirects(self):
-        """旧サイトのURLと同じ場所に、新しい記事への案内ページを置く。"""
+        """旧サイトのURLと同じ場所に、新しい記事への案内ページを置く。
+
+        対応表は common.legacy_pairs() が作る。verify.py と baseline.py も
+        同じものを使うので、作る枚数と点検する枚数が食い違わない。
+        """
         redirect_tpl = tpl("redirect.html")
         root = self.root_for(1)
-        pairs = []
-        for post in self.posts:
-            legacy = urllib.parse.unquote(post.get("legacy_slug", "") or "")
-            if legacy:
-                pairs.append((legacy, "posts/%s/" % post["slug"], post["title"]))
-        for page in self.pages:
-            legacy = urllib.parse.unquote(page.get("legacy_slug", "") or "")
-            if legacy and legacy not in ("ホーム",):
-                pairs.append((legacy, "%s/" % page["slug"], page["title"]))
-        pairs.append(("日記", "archive/", "全記事一覧"))
+        pairs = common.legacy_pairs(self.posts, self.pages)
+        # 公開フォルダの直下で、サイト自身が使っている名前。
+        # 旧URLがここに当たると、作ったページを転送ページが覆いかぶしてしまう。
+        reserved = rules.reserved_top_level(p.get("slug") for p in self.pages)
 
         made = skipped = 0
         for legacy, target, title in pairs:
-            if FORBIDDEN & set(legacy) or legacy in (".", ".."):
-                print("  [スキップ] 旧URL「%s」はフォルダ名に使えない文字を含みます。" % legacy)
+            ok, why = rules.safe_url_name(legacy, reserved=reserved)
+            if not ok:
+                print("  [スキップ] 旧URL「%s」は転送ページのフォルダ名に使えません: %s"
+                      % (legacy, why))
                 skipped += 1
                 continue
             html = render(
@@ -540,7 +576,8 @@ class Site:
                 site_title=common.esc(self.cfg["site_title"]),
                 canonical=self.canonical(target),
             )
-            write("%s/index.html" % legacy, html)
+            write("%s/index.html" % legacy, html,
+                  made_by="旧URL「%s」からの転送ページ" % legacy)
             made += 1
         print("  旧URLからの転送ページ: %d 枚（スキップ %d 件）" % (made, skipped))
 
@@ -580,7 +617,7 @@ a.button:hover{background:#1e5e57}
 </body>
 </html>
 """ % {"site": common.esc(self.cfg["site_title"]), "base": base_path}
-        write("404.html", html)
+        write("404.html", html, made_by="404 ページ")
         print("  404 ページ: 1 件（トップへのリンクは base_path = %s）" % base_path)
 
     def build_feed_and_sitemap(self):
@@ -611,7 +648,8 @@ a.button:hover{background:#1e5e57}
               "<title>%s</title><link>%s/</link><description>%s</description>"
               "<language>ja</language>%s</channel></rss>\n"
               % (common.esc(self.cfg["site_title"]), self.site_url,
-                 common.esc(self.cfg["site_description"]), "".join(items)))
+                 common.esc(self.cfg["site_description"]), "".join(items)),
+              made_by="feed.xml")
 
         cats, tags = set(), set()
         for post in self.posts:
@@ -628,12 +666,66 @@ a.button:hover{background:#1e5e57}
               '<?xml version="1.0" encoding="UTF-8"?>\n'
               '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">%s</urlset>\n'
               % "".join("<url><loc>%s/%s</loc></url>"
-                        % (self.site_url, common.quote_path(u)) for u in urls))
+                        % (self.site_url, common.quote_path(u)) for u in urls),
+              made_by="sitemap.xml")
         print("  feed.xml と sitemap.xml: 作成しました（%s）" % self.site_url)
 
+    def validate(self):
+        """組み立てる前に、記事の情報が使える形かどうかを確かめる。
+
+        途中で落ちると docs/ が作りかけのまま公開されてしまうため、
+        1ファイルも書き出さないうちに、まとめて調べて日本語で知らせる。
+        """
+        problems = []
+        for post in self.posts:
+            where = os.path.relpath(post.get("_path", "?"), common.ROOT)
+            slug = post.get("slug")
+            if not slug:
+                problems.append("%s に URL（slug）が書かれていません" % where)
+            else:
+                ok, why = rules.safe_slug(slug, reserved=())
+                if not ok:
+                    problems.append("%s の URL が使えません: %s" % (where, why))
+            date = post.get("date") or ""
+            if not rules.DATE_VALUE.match(date):
+                problems.append("%s の投稿日の形が違います: %r（例 2026-11-02 21:00:00）"
+                                % (where, date))
+            if not post.get("title"):
+                problems.append("%s に題（title）が書かれていません" % where)
+        reserved = rules.reserved_top_level(p.get("slug") for p in self.pages)
+        for page in self.pages:
+            where = os.path.relpath(page.get("_path", "?"), common.ROOT)
+            slug = page.get("slug")
+            if not slug:
+                problems.append("%s に URL（slug）が書かれていません" % where)
+                continue
+            others = {p.get("slug") for p in self.pages
+                      if p is not page and p.get("slug")}
+            ok, why = rules.safe_slug(slug, reserved=rules.RESERVED_STRUCTURE | others)
+            if not ok:
+                problems.append("%s の URL が使えません: %s" % (where, why))
+        for name in {c for p in self.posts for c in p.get("categories", [])}:
+            slug = self.cat_slug(name)
+            if not slug:
+                problems.append("カテゴリー「%s」から URL に使える名前が作れません" % name)
+                continue
+            ok, why = rules.safe_url_name(slug, reserved=reserved)
+            if not ok:
+                problems.append("カテゴリー「%s」の URL が使えません: %s" % (name, why))
+        if problems:
+            print("\n*** 中断します：記事の情報に問題があります ***")
+            for line in problems[:20]:
+                print("    %s" % line)
+            if len(problems) > 20:
+                print("    ... ほか %d 件" % (len(problems) - 20))
+            print("\n直してから、もう一度実行してください。"
+                  "（公開フォルダには何も書き出していません）")
+            raise SystemExit(1)
+
     def build(self):
+        self.validate()
         os.makedirs(common.DOCS, exist_ok=True)
-        write(".nojekyll", "")
+        write(".nojekyll", "", made_by=".nojekyll")
         print("サイトを組み立てます。")
         self.build_index()
         self.build_posts()
@@ -648,14 +740,22 @@ a.button:hover{background:#1e5e57}
 
 
 def sweep_old_files():
-    """前回のビルドで作ったが今回は作らなかったファイルだけを消す。"""
+    """前回のビルドで作ったが今回は作らなかったファイルだけを消す。
+
+    控えに書かれた場所が公開フォルダの外を指していたら消さない。
+    一度おかしな場所が記録されると、関係ないファイルを消してしまうため。
+    """
     if not os.path.exists(MANIFEST):
         return 0
     with open(MANIFEST, encoding="utf-8") as f:
         previous = set(json.load(f).get("files", []))
+    docs_real = os.path.realpath(common.DOCS)
     removed = 0
     for rel in sorted(previous - set(written_files), reverse=True):
-        abs_path = os.path.join(common.DOCS, rel.replace("/", os.sep))
+        abs_path = os.path.realpath(os.path.join(common.DOCS, rel.replace("/", os.sep)))
+        if not abs_path.startswith(docs_real + os.sep):
+            print("  [注意] 公開フォルダの外を指す記録は無視しました: %s" % rel)
+            continue
         if os.path.isfile(abs_path):
             os.remove(abs_path)
             removed += 1

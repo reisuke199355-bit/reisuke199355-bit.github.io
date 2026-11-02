@@ -1,0 +1,23 @@
+# 改行の扱いをどの環境でも同じにする。
+#
+# なぜ必要か:
+#   build.py は LF（Unix の改行）でファイルを書き出す。
+#   Windows の Git は設定によって改行を CRLF に変えることがあり、
+#   そうなると「作り直しても同じになるか」の点検が、中身は同じなのに
+#   違うと判定してしまう。ここで LF に固定して、その食い違いを防ぐ。
+#
+# 2026-11-02 の時点で、追跡しているテキストはすべて LF。
+# したがって、このファイルを置いても今日の中身は1バイトも変わらない。
+
+* text=auto eol=lf
+
+# 画像は中身をそのまま扱う（改行の置き換えをしない）。
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary

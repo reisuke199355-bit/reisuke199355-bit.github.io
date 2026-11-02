@@ -4,24 +4,28 @@
 使い方:
     python publish.py
 
+使い方（つづき）:
+    python publish.py --検査を省く   自動検査をとばして送信する（おすすめしません）
+
 送信前に次を確かめる。ひとつでも引っかかれば中断する。
+  - 自動検査（check.py）で重大な問題が見つかっていないか
   - バックアップの ZIP や WordPress の XML が含まれていないか
+    （RSS の feed.xml と sitemap.xml は公開して当然のものなので、止めない）
   - config.json の site_url が設定されているか
   - 何が送られるかを表示し、本人が「はい」と打ったか
+
+ふだんの日記の公開は、これまでと同じ手順のまま。
+検査に通れば、追加の操作は何もいらない。
 """
-import io
-import json
 import os
-import re
 import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import common
+import rules
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
-
-NEVER_PUBLISH = re.compile(r"(?i)\.(zip|7z|rar|tar|gz|sql|env|pem|key)$|wordpress.*\.xml$|^00_Backup/")
+common.use_utf8_stdout()
 
 
 def git(*args, check=True, quiet=False):
@@ -34,6 +38,20 @@ def git(*args, check=True, quiet=False):
     return result.stdout.strip()
 
 
+def git_paths(*args):
+    """ファイルの一覧を得る。日本語のファイル名もそのままの形で受け取る。
+
+    git は既定で日本語のパスを \\346\\227\\245 のような形に書き換えてしまう。
+    画面に出すときに読めないだけでなく、名前での判定もずれるため -z を使う。
+    """
+    result = subprocess.run(["git"] + list(args) + ["-z"], cwd=common.ROOT,
+                            capture_output=True, text=True,
+                            encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        return []
+    return [p for p in result.stdout.split("\0") if p]
+
+
 def ask(question):
     print("\n" + question)
     print('  続けるなら「はい」と入力して Enter（やめるなら、そのまま Enter）: ', end="")
@@ -41,11 +59,51 @@ def ask(question):
     return sys.stdin.readline().strip() in ("はい", "ハイ", "yes", "y", "Y")
 
 
+def run_checks():
+    """送信の前に自動検査を走らせる。重大な問題があれば False を返す。
+
+    検査は何も書き換えない（作り直しての照合は一時フォルダで行う）。
+    """
+    print("\n送信の前に、自動検査を行います（1秒ほど）...")
+    result = subprocess.run([sys.executable,
+                             os.path.join(common.ROOT, "tools", "check.py")],
+                            cwd=common.ROOT, capture_output=True, text=True,
+                            encoding="utf-8", errors="replace")
+    if result.returncode == 0:
+        for line in (result.stdout or "").split("\n"):
+            if "[注意]" in line:
+                print(line)
+        print("  [OK] 自動検査を通りました。")
+        return True
+
+    print("\n" + "*" * 56)
+    print("*** 中断します：自動検査で問題が見つかりました ***")
+    print("*" * 56)
+    shown = 0
+    for line in (result.stdout or "").split("\n"):
+        if "[NG]" in line:
+            print(line)
+            shown += 1
+            if shown >= 15:
+                print("  ... ほか（くわしくは python tools/check.py）")
+                break
+    if not shown:
+        print((result.stdout or result.stderr or "").strip()[-1500:])
+    print("\n直しかたは OPERATIONS.md に書いてあります。")
+    print("くわしく見るには、次を実行してください。")
+    print("  python tools/check.py")
+    return False
+
+
 def main():
+    args = sys.argv[1:]
+    skip_checks = any(a in ("--検査を省く", "--skip-checks") for a in args)
     print("=" * 56)
     print(" GitHub への公開")
     print("=" * 56)
     print("対象フォルダ: %s" % common.ROOT)
+    if skip_checks:
+        print("[注意] --検査を省く が指定されています。自動検査は行いません。")
 
     if subprocess.run(["git", "--version"], capture_output=True).returncode != 0:
         print("\nGit が見つかりません。https://git-scm.com/ からインストールしてください。")
@@ -72,15 +130,23 @@ def main():
         git("symbolic-ref", "HEAD", "refs/heads/main")
         print("リポジトリを作りました（ブランチ: main）。")
 
+    # 送信するものを決める前に、自動検査を済ませておく。
+    # 検査は何も書き換えないので、ここで止まっても手元のファイルはそのまま。
+    if not skip_checks and not run_checks():
+        return 1
+
     # 公開してはいけないファイルが混じっていないか
     git("add", "-A")
-    staged = [line for line in git("diff", "--cached", "--name-only").split("\n") if line]
-    danger = [f for f in staged if NEVER_PUBLISH.search(f)]
+    staged = git_paths("diff", "--cached", "--name-only")
+    danger = [(f, rules.never_publish(f)) for f in staged]
+    danger = [(f, why) for f, why in danger if why]
     if danger:
         print("\n*** 中断します：公開してはいけないファイルが含まれています ***")
-        for f in danger:
+        for f, why in danger:
             print("    %s" % f)
-        print("\n.gitignore を直してから、もう一度実行してください。")
+            print("        %s" % why)
+        print("\n.gitignore を直し、必要なら git rm --cached で取り除いてから、")
+        print("もう一度実行してください。")
         git("reset", check=False)
         return 1
 
@@ -117,9 +183,8 @@ def main():
         git("reset", check=False)
         return 0
 
-    message = "日記を更新"
-    if len(sys.argv) > 1:
-        message = " ".join(sys.argv[1:])
+    words = [a for a in args if not a.startswith("--")]
+    message = " ".join(words) if words else "日記を更新"
     git("commit", "-m", message)
     branch = git("rev-parse", "--abbrev-ref", "HEAD")
     print("\nGitHub へ送信します（ブランチ: %s）..." % branch)

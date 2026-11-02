@@ -1,0 +1,123 @@
+# ブログの自動検査
+#
+# 何をするか:
+#   記事のもと・公開済みの記録・公開物・リポジトリ衛生を点検し、
+#   結果を日本語でまとめて表示する。
+#
+# 何をしないか:
+#   - GitHub Pages の設定には触らない（公開は main/docs から、これまでどおり）
+#   - サイトを公開（デプロイ）しない
+#   - リポジトリに書き込まない（書き込みの権限を持たせていない）
+#   - main へ直接 push したこと自体を理由に失敗させない
+#     （ふだんの日記の公開は 3_GitHubへ公開.bat から main へ直接 push する運用）
+
+name: ブログの自動検査
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# 読み取りだけ。書き込みの権限は与えない。
+permissions:
+  contents: read
+
+# 同じブランチで続けて push したときは、古い実行を打ち切る。
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  検査:
+    name: 記事と公開物の点検
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: リポジトリを取り出す
+        uses: actions/checkout@v5
+
+      - name: Python を用意する
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 自動テスト（取り込みと検査の仕組みが働くか）
+        run: python tools/selftest.py
+
+      - name: 総合検査（記事・公開済みの記録・公開物・衛生）
+        run: python tools/check.py --ci
+
+      - name: リンクと旧URL転送の点検
+        run: python tools/verify.py
+
+      - name: 検査で何も書き換えていないことの確認
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::検査がファイルを書き換えました。検査は読むだけであるべきです。"
+            git status --porcelain
+            exit 1
+          fi
+          echo "作業ツリーに変化はありません。"
+
+      - name: 失敗したときの案内
+        if: failure()
+        run: |
+          {
+            echo "## 検査で問題が見つかりました"
+            echo ""
+            echo "上の各ステップのログに、何が問題かを日本語で書いています。"
+            echo ""
+            echo "手元で同じ検査を行うには、blog フォルダで次を実行してください。"
+            echo ""
+            echo '```'
+            echo "python tools/check.py"
+            echo '```'
+            echo ""
+            echo "直しかたは OPERATIONS.md にまとめてあります。"
+            echo ""
+            echo "よくある原因:"
+            echo ""
+            echo "- 公開済みの記事を直した → 意図した修正なら \`python tools/baseline.py --update\`"
+            echo "- docs/ を手で直した → \`python tools/build.py\` で作り直す"
+            echo "- 公開してはいけないファイルを入れた → .gitignore を直し \`git rm --cached\` で外す"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  公開経路の記録:
+    name: どこから公開されたかの記録
+    # main への push のときだけ動く。失敗はさせない（記録するだけ）。
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: リポジトリを取り出す
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+
+      - name: 記録する
+        run: |
+          parents=$(git rev-list --parents -n 1 HEAD | wc -w)
+          subject=$(git log -1 --pretty=%s)
+          {
+            echo "## main への公開"
+            echo ""
+            echo "- 件名: ${subject}"
+            if [ "$parents" -ge 3 ]; then
+              echo "- 経路: プルリクエストの取り込み（マージ）"
+            elif printf '%s' "$subject" | grep -Eq '\(#[0-9]+\)$'; then
+              echo "- 経路: プルリクエストの取り込み（まとめコミット）"
+            else
+              echo "- 経路: 手元からの直接 push"
+              echo ""
+              echo "ふだんの日記の公開（3_GitHubへ公開.bat）はこの経路です。"
+              echo "問題ではありません。"
+              echo ""
+              echo "ツールや設定を変える作業のときは、作業ブランチと"
+              echo "プルリクエストを使うことをおすすめします。"
+            fi
+            echo ""
+            echo "記事の内容そのものの点検結果は「記事と公開物の点検」を見てください。"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "記録しました（この手順では失敗させません）。"
