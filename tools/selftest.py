@@ -67,6 +67,22 @@ def tree_digest(root, only_ext=None):
     return out
 
 
+def manifest_state(root):
+    """作業用の控え（.build-manifest.json）のいまの様子を返す。
+
+    有無・中身・更新日時をまとめて見る。無いときは None。
+    この控えは build.py がふだん作るもので、手元には残っているのが
+    ふつう。だから「無いこと」ではなく「変わっていないこと」を見る。
+    """
+    path = os.path.join(root, ".build-manifest.json")
+    if not os.path.exists(path):
+        return None
+    info = os.stat(path)
+    with open(path, "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()
+    return (info.st_size, info.st_mtime_ns, digest)
+
+
 def setUpModule():
     """ひな型を1回だけ作る（毎回ビルドすると遅いため）。"""
     global TEMPLATE
@@ -252,16 +268,23 @@ class NormalUse(Base):
                                      "%s が公開を止められていません" % path)
 
     def test_08_check_writes_nothing(self):
-        """検査を走らせても、記事と公開物が変わらないこと。"""
+        """検査を走らせても、記事・公開物・作業用の控えが変わらないこと。
+
+        .build-manifest.json を消したりはしない。
+        build.py がふだん作る控えなので、手元にあるのがふつう。
+        あっても無くても、検査の前後で変わっていなければよい。
+        """
         before_posts = tree_digest(os.path.join(ROOT, "content"))
         before_docs = tree_digest(os.path.join(ROOT, "docs"))
+        before_manifest = manifest_state(ROOT)
         self.assertOK(run(ROOT, "check.py"))
         self.assertEqual(before_posts, tree_digest(os.path.join(ROOT, "content")),
                          "検査が content/ を書き換えました")
         self.assertEqual(before_docs, tree_digest(os.path.join(ROOT, "docs")),
                          "検査が docs/ を書き換えました")
-        self.assertFalse(os.path.exists(os.path.join(ROOT, ".build-manifest.json")),
-                         "検査がリポジトリ直下に控えを作りました")
+        self.assertEqual(before_manifest, manifest_state(ROOT),
+                         "検査が作業用の控え（.build-manifest.json）を"
+                         "作ったか、書き換えました")
 
     def test_09_legacy_exceptions_are_preserved(self):
         """旧URLが題と一致しない4件が、そのまま残っていること。"""
@@ -332,6 +355,36 @@ class NormalUse(Base):
         self.assertFalse(os.path.exists(box.blog_path(".baseline-unlock")),
                          "修正許可の控えが残っています")
         self.assertTrue(os.path.isfile(path))
+
+    def test_13_check_keeps_an_existing_build_manifest(self):
+        """控えが置いてあるとき、検査がそれに触らないこと。
+
+        手元の状態。build.py を走らせたあとは、いつもこうなっている。
+        """
+        box = self.sandbox()
+        self.assertOK(run(box.blog, "build.py"))
+        before = manifest_state(box.blog)
+        self.assertIsNotNone(before, "build.py が控えを作っていません")
+        self.assertOK(run(box.blog, "check.py"))
+        after = manifest_state(box.blog)
+        self.assertIsNotNone(after, "検査が控えを消しました")
+        self.assertEqual(before, after,
+                         "検査が控えの中身か更新日時を変えました")
+
+    def test_14_check_does_not_create_a_build_manifest(self):
+        """控えが無いとき、検査がそれを作らないこと。
+
+        GitHub から取り出したばかりの状態（控えは公開物に含めていない）。
+        検査は読むだけなので、ここで作ってはいけない。
+        """
+        box = self.sandbox()
+        path = box.blog_path(".build-manifest.json")
+        if os.path.exists(path):
+            os.remove(path)
+        self.assertIsNone(manifest_state(box.blog), "控えを消しきれていません")
+        self.assertOK(run(box.blog, "check.py"))
+        self.assertIsNone(manifest_state(box.blog),
+                          "検査がリポジトリ直下に控えを作りました")
 
 
 # ----------------------------------------------------------- 異常系（取り込み）
