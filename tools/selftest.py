@@ -1161,6 +1161,51 @@ class CloudPosting(Base):
             self.assertEqual(before, hashlib.sha256(f.read()).hexdigest(),
                              "公開済みの記事が書き換えられました")
 
+    def test_105_a_category_with_shell_characters_stays_text(self):
+        """シェルで意味を持つ文字を含むカテゴリーでも、文字のまま扱うこと。
+
+        カテゴリー名はフォルダ名になり、そのまま記事の URL にもなる。
+        rules.safe_url_name が止めるのは改行と \\ / : * ? " < > | だけなので、
+        $ ( ) ` ; & ' を含む名前は登録できてしまう。
+        登録できてしまう以上、そのあとの書き出し・組み立て・検査で
+        「ただの文字」として扱われ、コマンドとして動かないことを確かめる。
+
+        ワークフロー側で slug を env: 経由にしているのは、このため。
+        その決まりは test_119 と test_120 が見張っている。
+        """
+        box = self.sandbox()
+        box.make_git()
+        # 前後を普通の文字にしてあるのは、名前の端の扱い（末尾の「.」や
+        # 空白など）が OS で違うのを、この試験に持ち込まないため。
+        name = "試し$(echo A)`echo B`;&\'終"
+        config = json.loads(box.read("config.json"))
+        config["categories"].append(name)
+        box.write(json.dumps(config, ensure_ascii=False, indent=1),
+                  "config.json")
+        box.put(name, "2026-11-03.txt", "特殊文字のカテゴリーの試しです。\n")
+
+        self.assertOK(run(box.blog, "import_txt.py"))
+
+        slug = "%s/2026-11-03" % name
+        self.assertTrue(
+            os.path.exists(box.blog_path("content", "posts", slug + ".html")),
+            "記事が /posts/%s/ に書き出されていません" % slug)
+        meta = common.parse_front_matter(
+            box.read("content", "posts", slug + ".html"))[0]
+        self.assertEqual(slug, meta["slug"],
+                         "slug が文字のまま保たれていません")
+        self.assertEqual([name], meta["categories"],
+                         "カテゴリー名が文字のまま保たれていません")
+
+        # 名前が「実行された跡」になっていないこと。$(echo A) が動いていれば
+        # A になり、`echo B` が動いていれば B になる。
+        self.assertIn("$(echo A)", meta["slug"])
+        self.assertIn("`echo B`", meta["slug"])
+
+        self.assertOK(run(box.blog, "build.py"))
+        self.assertOK(run(box.blog, "check.py"))
+        self.assertOK(run(box.blog, "verify.py"))
+
 
 # ------------------------------------- 投稿の仕組みそのものの決まり（V02）
 
@@ -1170,6 +1215,38 @@ def read_root(*parts):
 
 
 POSTING_WORKFLOWS = ("post-from-issue.yml", "post-from-inbox.yml")
+WORKFLOW_DIR = os.path.join(ROOT, ".github", "workflows")
+
+
+def run_lines(text):
+    """run: のブロックに入っている行を (行番号, 行) で返す。
+
+    行頭の字下げで、ブロックの終わりを見分ける。
+    コメントの行（# で始まる行）は返さない。
+    """
+    lines = text.split("\n")
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if re.match(r"^(?:-\s+)?run:\s+(?![|>])(.+)$", stripped):
+            out.append((i + 1, line))
+            i += 1
+            continue
+        if re.match(r"^(?:-\s+)?run:\s*(?:\|-?|>-?)?\s*$", stripped):
+            indent = len(line) - len(line.lstrip())
+            i += 1
+            while i < len(lines):
+                nxt = lines[i]
+                if nxt.strip() and (len(nxt) - len(nxt.lstrip())) <= indent:
+                    break
+                if not nxt.lstrip().startswith("#"):
+                    out.append((i + 1, nxt))
+                i += 1
+            continue
+        i += 1
+    return out
 
 
 class CloudSafety(unittest.TestCase):
@@ -1290,6 +1367,83 @@ class CloudSafety(unittest.TestCase):
         text = read_root("inbox", "README.md")
         self.assertIn("公開リポジトリ", text)
         self.assertIn("inbox/2026-11-02.txt", text)
+
+    def test_119_no_workflow_expression_inside_run(self):
+        """run: の中に ${{ }} を書いていないこと。
+
+        ${{ }} は、シェルが動く前に「文字」として差し替えられる。
+        中身に $( ) やバッククォートが入っていれば、それがそのまま
+        コマンドとして動いてしまう。
+        だから run: の中では一度も使わず、env: で環境変数に受けてから
+        使う、という決まりにしている。例外を作らないほうが、ここで
+        機械的に見張れる。
+        """
+        names = sorted(n for n in os.listdir(WORKFLOW_DIR)
+                       if n.endswith((".yml", ".yaml")))
+        self.assertTrue(names, "ワークフローが見つかりません")
+        for name in names:
+            for num, line in run_lines(self.workflow(name)):
+                with self.subTest(name=name, line=num):
+                    self.assertNotIn(
+                        "${{", line,
+                        "%s の %d 行目: run: の中に ${{ }} があります。"
+                        "env: で環境変数に受けてから使ってください → %s"
+                        % (name, num, line.strip()))
+
+    def test_120_step_results_are_passed_through_env(self):
+        """前の段の結果は、env: で環境変数に受けていること。
+
+        test_119 は「run: の中に無いこと」を見るだけなので、
+        受け渡しそのものが消えていないかを、ここで見る。
+        """
+        issue = self.workflow("post-from-issue.yml")
+        for want in ("POST_BRANCH: ${{ steps.push.outputs.branch }}",
+                     "POST_SLUG: ${{ steps.push.outputs.slug }}",
+                     "PR_URL: ${{ steps.pr.outputs.url }}"):
+            self.assertIn(want, issue,
+                          "post-from-issue.yml に「%s」がありません" % want)
+            self.assertIn(want.split(":")[0].strip(), issue)
+        inbox = self.workflow("post-from-inbox.yml")
+        self.assertIn("POST_SLUGS: ${{ steps.push.outputs.slugs }}", inbox,
+                      "post-from-inbox.yml に POST_SLUGS がありません")
+
+    def test_121_a_dangerous_slug_does_not_run_as_a_command(self):
+        """いまの渡し方では、危ない slug がコマンドとして動かないこと。
+
+        いまの渡し方（env: で環境変数にする）と、むかしの渡し方
+        （run: の中に ${{ }} で文字として埋め込む）を、実際のシェルで
+        動かして比べる。前者では動かず、後者では動いてしまうことを示す。
+        後者まで確かめるのは、この試験に効き目があることの裏取り。
+        （動かないことだけを見ていると、試験の書き方を間違えていても
+        気づけない。）
+        """
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("bash が見つかりません（Windows なら Git 付属の bash）")
+        box = tempfile.mkdtemp(prefix="blog-shell-")
+        try:
+            slug = "$(touch pwned-by-slug)/2026-11-03"
+            mark = os.path.join(box, "pwned-by-slug")
+
+            # いまの渡し方: 環境変数で渡す
+            subprocess.run(
+                [bash, "-c", 'printf "%s\\n" "記事: ${POST_SLUG}" >/dev/null'],
+                cwd=box, env=dict(os.environ, POST_SLUG=slug),
+                capture_output=True)
+            self.assertFalse(
+                os.path.exists(mark),
+                "環境変数で渡したのに、slug の中身がコマンドとして動きました")
+
+            # むかしの渡し方: 文字として差し替える（${{ }} と同じこと）
+            subprocess.run(
+                [bash, "-c",
+                 'printf "%%s\\n" "記事: %s" >/dev/null' % slug],
+                cwd=box, capture_output=True)
+            self.assertTrue(
+                os.path.exists(mark),
+                "この試験に効き目がありません（差し込みが起きていません）")
+        finally:
+            shutil.rmtree(box, ignore_errors=True)
 
 
 if __name__ == "__main__":

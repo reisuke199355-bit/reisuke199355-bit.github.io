@@ -128,12 +128,30 @@ jobs:
             exit 1
           fi
           slugs=$(python -c "import json,sys;d=json.load(open(sys.argv[1],encoding='utf-8'));print(' '.join(a['slug'] for a in d['imported']))" "${RUNNER_TEMP}/inbox.json")
+          # 改行が混ざった値を $GITHUB_OUTPUT に書くと、次の行が別の
+          # 出力として読まれてしまう。日本語を含むので文字種では弾けない。
+          # 改行だけを数えて見る（printf は末尾に改行を足さない）。
+          if [ "$(printf '%s' "$slugs" | wc -l)" != "0" ]; then
+            echo "::error::記事の URL に改行が入っています。中止します。"
+            exit 1
+          fi
           git commit -m "日記を追加: ${slugs}"
           git push origin "HEAD:refs/heads/${BRANCH}"
           echo "slugs=${slugs}" >> "$GITHUB_OUTPUT"
 
       - name: プルリクエストを作る
         if: steps.make.outcome == 'success' && steps.make.outputs.imported != '0'
+        env:
+          # 前の段の結果を、run: の中に ${{ }} で書かないこと。
+          # ${{ }} はシェルが動く前に「文字」として差し替わるため、
+          # 中身に $( ) やバッククォートが入っていると、それがそのまま
+          # コマンドとして動いてしまう。
+          # 記事の URL（slug）は日付と登録済みカテゴリーから作るが、
+          # カテゴリー名には $ ` ; & ' などを登録できてしまう
+          # （rules.safe_url_name が止めるのは改行と \ / : * ? " < > | だけ）。
+          # 環境変数なら、どんな文字が入っていても文字のまま渡る。
+          # この決まりは tools/selftest.py の test_119 が見張っている。
+          POST_SLUGS: ${{ steps.push.outputs.slugs }}
         run: |
           url=$(gh pr list --head "$BRANCH" --state open --json url --jq '.[0].url // empty')
           body="${RUNNER_TEMP}/pr.md"
@@ -142,7 +160,7 @@ jobs:
             echo ""
             echo "inbox に置かれた TXT から記事を作りました。"
             echo ""
-            echo "- 記事: ${{ steps.push.outputs.slugs }}"
+            echo "- 記事: ${POST_SLUGS}"
             echo ""
             echo "### 済んでいる検査"
             echo ""
@@ -161,13 +179,13 @@ jobs:
           } > "$body"
           if [ -z "$url" ]; then
             url=$(gh pr create --base "$DEFAULT_BRANCH" --head "$BRANCH" \
-              --title "日記を追加: ${{ steps.push.outputs.slugs }}" --body-file "$body")
+              --title "日記を追加: ${POST_SLUGS}" --body-file "$body")
           else
             gh pr comment "$url" --body-file "$body" || true
           fi
           {
             echo "## 記事を作りました"
             echo ""
-            echo "- 記事: ${{ steps.push.outputs.slugs }}"
+            echo "- 記事: ${POST_SLUGS}"
             echo "- プルリクエスト: ${url}"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -69,9 +69,15 @@ jobs:
 
       - name: 結果を書く
         if: always()
+        env:
+          # job.status は GitHub が決める値（success / failure / cancelled）
+          # なので危なくはないが、「run: の中に ${{ }} を書かない」という
+          # 決まりを1つの例外もなく守るため、ここも env: 経由にする。
+          # 例外を作らないほうが、test_119 で機械的に見張れる。
+          JOB_STATUS: ${{ job.status }}
         run: |
           {
-            if [ "${{ job.status }}" = "success" ]; then
+            if [ "$JOB_STATUS" = "success" ]; then
               echo "## 投稿機能の予行演習：通りました"
               echo ""
               echo "inbox と投稿フォームの両方から記事を作り、検査まで通ることを"

@@ -228,18 +228,94 @@ GitHub Pages の公開は自動検査とは別に動いています。
 
 ---
 
-## 参考：もっと厳しくしたいとき
+## 参考：main のブランチ保護（いまは設定していません）
 
-いまは `main` へ直接 push できます（`3_GitHubへ公開.bat` がそうしているため）。
-将来、ツールの変更だけを必ずレビューしてから入れたくなったら、
-GitHub の **Settings → Branches** でブランチ保護を設定できます。
+V02 の安全性検査で、こういうことが分かりました。
 
-ただし保護をかけると `3_GitHubへ公開.bat` での公開ができなくなるので、
-**日記の投稿方法を先に変えてから**にしてください。
-入れ替えの道筋は `DESIGN-cloud-posting.md` に書いてあります。
+> Actions に渡す `contents: write` は**リポジトリ全体に効く権限**で、
+> 「この作業ブランチだけ」には絞れない。
 
-V02 でスマホからの投稿（`MANUAL-cloud-posting.md`）が入ったので、
-「日記はスマホから、ツールの変更はプルリクエストで」という形に寄せていけば、
-`main` を保護しても困らなくなります。保護をかけるときは、
-持ち主だけは直接 push できるように例外（bypass）を入れておくと、
-`3_GitHubへ公開.bat` もそのまま使えます。
+ワークフロー側は作業ブランチにしか push せず、送信先が既定ブランチと
+同じ名前なら中止する作りになっています。それでもトークン自体は
+`main` へ push できる形なので、ここを締めるにはブランチ保護が要る、
+という話になりました。
+
+**ただし、いまは設定していません。** 設定の仕方を間違えると
+`3_GitHubへ公開.bat` で公開できなくなるからです。
+
+### 何が壊れるのか
+
+`3_GitHubへ公開.bat` は、中で `publish.py` が
+`git push -u origin main` を直接実行しています。
+`main` に「プルリクエストを必須にする」保護がかかり、
+**それが自分にも適用されると、この push が拒否されて公開できなくなります。**
+
+### 安全な順序
+
+GitHub の決まりでは、**リポジトリの管理者（個人リポジトリの持ち主）には、
+既定でブランチ保護の制限がかかりません。**
+
+> the restrictions of a branch protection rule don't apply to people
+> with admin permissions to the repository
+
+管理者にも適用するための設定が **Do not allow bypassing the above settings**
+で、これは既定で**入っていません**。だから順序はこうなります。
+
+1. **Settings → Branches → Add branch protection rule**
+   - Branch name pattern に `main`
+   - **Require a pull request before merging** を入れる
+   - **Do not allow bypassing the above settings** は**入れない**
+2. そのまま `3_GitHubへ公開.bat` を1回実行し、**公開できることを確かめる**
+3. それから、Actions が `main` へ push できなくなったかを確かめる
+
+**手順2を飛ばさないでください。** 保護はあとから消せますが、
+公開できなくなったことに気づかないまま日記を書き続けるのが、いちばん困ります。
+うまくいかなければ、その保護ルールを消せば元に戻ります。
+
+### 確かめようがない点（正直に書いておきます）
+
+手順3の「Actions が `main` へ push できなくなったか」は、
+**GitHub の公式ドキュメントに書かれていません。**
+
+`GITHUB_TOKEN` は GitHub App のトークンです。保護ブランチの説明は
+"people with admin permissions" を主語にしていて、App のトークンが
+同じ扱いになるのかは書かれていません。
+（"People **and apps** with admin permissions to a repository are always
+able to push to a protected branch" という書き方もあり、どちらとも読めます。）
+
+ですから、**ブランチ保護を「Actions を止める仕組み」として当てにしないでください。**
+いま実際に Actions を `main` から遠ざけているのは、次の3つです。
+
+| 仕組み | 見張っている試験 |
+|---|---|
+| ワークフローが `main` へ push していない | `test_110` |
+| `permissions:` が既定で `contents: read`、必要な job にだけ足す | `test_113` |
+| 送信先が既定ブランチと同じ名前なら中止する（`DEFAULT_BRANCH` の確認） | `test_110` |
+
+ブランチ保護は、この上に重ねる4枚目です。
+効くかどうかを知りたければ、保護をかけたあとに一度試すしかありません。
+
+### 個人リポジトリでの制限
+
+- クラシックな保護では、**特定の人を例外リストに入れることはできません。**
+
+  > Actors may only be added to bypass lists when the repository belongs
+  > to an organization.
+
+  Organization のリポジトリだけの機能です。だから「持ち主だけ例外」は、
+  例外リストではなく**「管理者には既定で適用されない」という性質**で実現します。
+- 新しい **Rulesets** では、例外リスト（Bypass list）に
+  "Repository admins" を入れられます。ただし個人アカウントの Public
+  リポジトリで使えるかは、公式ページからは読み取れませんでした。
+  画面に出てこなければ、クラシックな保護のほうを使ってください。
+
+### 日記もプルリクエスト経由に寄せる場合
+
+「日記もツールの変更も、すべてプルリクエスト経由」にするなら、
+`3_GitHubへ公開.bat` で直接公開するのをやめ、`inbox/` 方式
+（`MANUAL-cloud-posting.md` の 3-A）に寄せます。
+そうすれば **Do not allow bypassing the above settings** まで入れられます。
+
+その場合、手元で書いた TXT も `inbox/` に置いて作業ブランチへ push し、
+プルリクエストを Merge して公開する流れになります。
+乗り換えの道筋は `DESIGN-cloud-posting.md` にあります。
