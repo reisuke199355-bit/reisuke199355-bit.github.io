@@ -11,6 +11,11 @@
   "sort_by": "post_date",
   "articles_dir": "../10_記事管理",
   "default_category": "日記",
+  "categories": [
+    "日記",
+    "お知らせ",
+    "感想"
+  ],
   "legacy_slug_map": {
     "7": "hello-world",
     "14": "circleback-review"

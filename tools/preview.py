@@ -11,7 +11,6 @@ GitHub Pages と同じように http:// で開くため、日本語URLや相対�
 """
 import functools
 import http.server
-import io
 import os
 import socket
 import socketserver
@@ -22,7 +21,7 @@ import webbrowser
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import common
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+common.use_utf8_stdout()
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):

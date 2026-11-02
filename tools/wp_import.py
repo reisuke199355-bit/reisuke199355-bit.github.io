@@ -7,7 +7,6 @@
 原本は読み取りのみで扱い、content/posts と docs/images に出力する。
 """
 import collections
-import io
 import os
 import re
 import sys
@@ -18,7 +17,7 @@ import zipfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import common
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+common.use_utf8_stdout()
 
 NS = {
     "wp": "http://wordpress.org/export/1.2/",
