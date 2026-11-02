@@ -1,0 +1,173 @@
+# inbox に置かれた TXT から日記の記事を作る
+#
+# 何をするか:
+#   1. 本人が inbox/<日付>.txt を作業ブランチに置く
+#      （GitHub の Web やアプリ、または非公開リポジトリからの受け渡しで）
+#   2. このワークフローが記事ファイルを作り、inbox の TXT を片づける
+#   3. サイトを組み立て直し、自動検査を走らせる
+#   4. 検査に通ったときだけ、同じ作業ブランチへ commit し、
+#      プルリクエストを作る（無ければ）
+#
+# 何をしないか:
+#   - main では動かない（main への自動 push はしない）
+#   - プルリクエストを自動で Merge しない
+#   - baseline.json を書き換えない
+#   - GitHub Pages の設定に触らない
+#
+# 繰り返し動いてしまわない理由:
+#   GitHub の自動トークン（GITHUB_TOKEN）で push したものは、
+#   新しいワークフローを起こさない決まりになっている。
+#   だから、このワークフロー自身の commit で再び動くことはない。
+name: inbox から記事を作る
+
+on:
+  push:
+    branches-ignore:
+      - main
+    paths:
+      - 'inbox/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: post-inbox-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  post:
+    name: 記事を作って検査する
+    # 置いたのがリポジトリの持ち主のときだけ動かす（公開リポジトリのため）。
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write          # この作業ブランチへの push（main へは push しない）
+      pull-requests: write     # プルリクエストを作る
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BRANCH: ${{ github.ref_name }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - name: リポジトリを取り出す
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Python を用意する
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: inbox を見て、記事を作り、検査する
+        id: make
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/log.txt"
+          : > "$log"
+          python tools/import_inbox.py --json "${RUNNER_TEMP}/inbox.json" 2>&1 | tee -a "$log"
+          count=$(python -c "import json,sys;print(len(json.load(open(sys.argv[1],encoding='utf-8'))['imported']))" "${RUNNER_TEMP}/inbox.json")
+          echo "imported=${count}" >> "$GITHUB_OUTPUT"
+          if [ "$count" = "0" ]; then
+            echo "取り込む TXT はありませんでした。ここで終わります。" | tee -a "$log"
+            exit 0
+          fi
+          python tools/build.py       2>&1 | tee -a "$log"
+          python tools/check.py --ci  2>&1 | tee -a "$log"
+          python tools/verify.py      2>&1 | tee -a "$log"
+          python tools/selftest.py    2>&1 | tee -a "$log"
+
+      - name: 作れなかったことを知らせる
+        if: steps.make.outcome == 'failure'
+        run: |
+          out="${RUNNER_TEMP}/fail.md"
+          {
+            echo "## inbox の TXT を記事にできませんでした"
+            echo ""
+            echo "inbox の TXT はそのまま残してあります。直してから置き直してください。"
+            echo ""
+            echo '```'
+            tail -n 80 "${RUNNER_TEMP}/log.txt" 2>/dev/null || echo "(ログがありません)"
+            echo '```'
+            echo ""
+            echo "直しかたは MANUAL-cloud-posting.md にあります。"
+          } > "$out"
+          cat "$out" >> "$GITHUB_STEP_SUMMARY"
+          url=$(gh pr list --head "$BRANCH" --state open --json url --jq '.[0].url // empty' || true)
+          if [ -n "$url" ]; then
+            gh pr comment "$url" --body-file "$out" || true
+          fi
+          echo "::error::inbox の TXT を記事にできませんでした。"
+          exit 1
+
+      - name: 何もすることが無かったとき
+        if: steps.make.outcome == 'success' && steps.make.outputs.imported == '0'
+        run: |
+          {
+            echo "## 取り込む TXT はありませんでした"
+            echo ""
+            echo "inbox に \`2026-11-02.txt\` のような名前で TXT を置いてください。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 作業ブランチへ送る
+        id: push
+        if: steps.make.outcome == 'success' && steps.make.outputs.imported != '0'
+        run: |
+          if [ "$BRANCH" = "$DEFAULT_BRANCH" ]; then
+            echo "::error::既定のブランチには送りません。"
+            exit 1
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "::error::送るものがありません。"
+            exit 1
+          fi
+          slugs=$(python -c "import json,sys;d=json.load(open(sys.argv[1],encoding='utf-8'));print(' '.join(a['slug'] for a in d['imported']))" "${RUNNER_TEMP}/inbox.json")
+          git commit -m "日記を追加: ${slugs}"
+          git push origin "HEAD:refs/heads/${BRANCH}"
+          echo "slugs=${slugs}" >> "$GITHUB_OUTPUT"
+
+      - name: プルリクエストを作る
+        if: steps.make.outcome == 'success' && steps.make.outputs.imported != '0'
+        run: |
+          url=$(gh pr list --head "$BRANCH" --state open --json url --jq '.[0].url // empty')
+          body="${RUNNER_TEMP}/pr.md"
+          {
+            echo "## 日記を追加します"
+            echo ""
+            echo "inbox に置かれた TXT から記事を作りました。"
+            echo ""
+            echo "- 記事: ${{ steps.push.outputs.slugs }}"
+            echo ""
+            echo "### 済んでいる検査"
+            echo ""
+            echo "- 自動テスト（\`tools/selftest.py\`）"
+            echo "- 総合検査（\`tools/check.py\`）"
+            echo "- リンクと旧URL転送の点検（\`tools/verify.py\`）"
+            echo ""
+            echo "検査はこの実行の中で、すべて済ませています。"
+            echo "このプルリクエストは GitHub の自動トークンで作ったため、"
+            echo "ここでの自動検査は「承認待ち」で止まります（GitHub の決まり）。"
+            echo "もう一度走らせたいときは **Approve workflows to run** を押してください。"
+            echo ""
+            echo "### 公開するには"
+            echo ""
+            echo "このプルリクエストを **Merge** すると公開されます（数分で反映）。"
+          } > "$body"
+          if [ -z "$url" ]; then
+            url=$(gh pr create --base "$DEFAULT_BRANCH" --head "$BRANCH" \
+              --title "日記を追加: ${{ steps.push.outputs.slugs }}" --body-file "$body")
+          else
+            gh pr comment "$url" --body-file "$body" || true
+          fi
+          {
+            echo "## 記事を作りました"
+            echo ""
+            echo "- 記事: ${{ steps.push.outputs.slugs }}"
+            echo "- プルリクエスト: ${url}"
+          } >> "$GITHUB_STEP_SUMMARY"

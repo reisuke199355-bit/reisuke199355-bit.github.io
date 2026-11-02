@@ -1,0 +1,90 @@
+# 投稿機能の予行演習
+#
+# 何をするか:
+#   クラウド投稿の仕組み（inbox・投稿フォーム）を、一時フォルダの中で
+#   通しで動かして確かめる。読むだけで、リポジトリには何も書かない。
+#
+# 何をしないか:
+#   - 記事を作らない（一時フォルダの中だけ）
+#   - push しない / プルリクエストを作らない / Issue に書かない
+#   - 書き込みの権限を持たない
+#
+# なぜ別のワークフローにしてあるか:
+#   ふだんの「ブログの自動検査」（check.yml）は記事と公開物の点検。
+#   こちらは投稿の仕組みそのものの点検。失敗したときに、どちらが
+#   壊れたのかが一目で分かるように分けている。
+name: 投稿機能の予行演習
+
+on:
+  push:
+    paths:
+      - 'tools/**'
+      - 'templates/**'
+      - 'config.json'
+      - 'inbox/**'
+      - '.github/workflows/post-*.yml'
+      - '.github/ISSUE_TEMPLATE/**'
+  pull_request:
+  workflow_dispatch:
+
+# 読み取りだけ。書き込みの権限は与えない。
+permissions:
+  contents: read
+
+concurrency:
+  group: post-rehearsal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rehearse:
+    name: 投稿の通し試験
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: リポジトリを取り出す
+        uses: actions/checkout@v5
+
+      - name: Python を用意する
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 予行演習（inbox と投稿フォームを通しで動かす）
+        run: python tools/rehearse_post.py
+
+      - name: 自動テスト（投稿の仕組み）
+        run: python tools/selftest.py CloudPosting
+
+      - name: 自動テスト（ふだんの使い方と、まちがいを止める仕組み）
+        run: python tools/selftest.py
+
+      - name: 予行演習が何も書き換えていないことの確認
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::予行演習がファイルを書き換えました。読むだけであるべきです。"
+            git status --porcelain
+            exit 1
+          fi
+          echo "作業ツリーに変化はありません。"
+
+      - name: 結果を書く
+        if: always()
+        run: |
+          {
+            if [ "${{ job.status }}" = "success" ]; then
+              echo "## 投稿機能の予行演習：通りました"
+              echo ""
+              echo "inbox と投稿フォームの両方から記事を作り、検査まで通ることを"
+              echo "一時フォルダの中で確かめました。リポジトリには何も書いていません。"
+            else
+              echo "## 投稿機能の予行演習：問題が見つかりました"
+              echo ""
+              echo "上のログに、何が問題かを日本語で書いています。"
+              echo ""
+              echo "手元で同じものを試すには、blog フォルダで次を実行してください。"
+              echo ""
+              echo '```'
+              echo "python tools/rehearse_post.py -v"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,188 @@
+# 投稿フォーム（Issue）から日記の記事を作る
+#
+# 何をするか:
+#   1. 本人が「投稿」ラベルの Issue を作る（.github/ISSUE_TEMPLATE/post.yml）
+#   2. このワークフローが記事ファイルを作り、サイトを組み立て直す
+#   3. 自動検査（check.py / verify.py / selftest.py）を走らせる
+#   4. 検査に通ったときだけ、作業ブランチへ push してプルリクエストを作る
+#   5. 結果を Issue に返事として書く
+#
+# 何をしないか:
+#   - main へ push しない（公開は人がプルリクエストを Merge したときだけ）
+#   - プルリクエストを自動で Merge しない
+#   - baseline.json を書き換えない（公開済みの凍結は人が更新する）
+#   - GitHub Pages の設定に触らない
+#
+# 安全のための決まり:
+#   - リポジトリの持ち主が作った Issue だけを相手にする（公開リポジトリのため）
+#   - Issue の本文を run: に直接書かない。環境変数で渡す
+#     （本文に書かれた文字がコマンドとして動いてしまうのを防ぐ）
+#   - 権限は必要なものだけ与える
+name: 投稿フォームから記事を作る
+
+on:
+  issues:
+    types: [opened, edited, reopened, labeled]
+
+# 既定は読み取りだけ。必要な権限は job 側で足す。
+permissions:
+  contents: read
+
+# 同じ Issue の実行が重ならないようにする（打ち切りはしない）。
+concurrency:
+  group: post-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  post:
+    name: 記事を作って検査する
+    # 「投稿」ラベルが付いていて、かつ Issue を作ったのがリポジトリの
+    # 持ち主のときだけ動かす。公開リポジトリなので、ほかの人が同じ
+    # フォームで Issue を作っても、ここで止まる。
+    #
+    # 持ち主かどうかは2つの見かたで確かめる（どちらか一方でも足りるが、
+    # 片方の思い違いで開いてしまわないように重ねている）。
+    #   user.login == repository_owner … 作った人の名前そのもの
+    #   author_association == 'OWNER'  … GitHub が付ける「持ち主」の印
+    # 覚え書き: このリポジトリを個人から Organization へ移すと、
+    # 持ち主でも author_association が 'MEMBER' になり、ここで止まるように
+    # なる（公開されてしまう向きには壊れない）。そのときは下の1行を外す。
+    #
+    # 「編集したときにも動く」ようにしてあるのは、止まった投稿を
+    # 直して出し直せるようにするため。Issue を編集できるのは、
+    # 書き込みの権限を持つ人（＝持ち主）だけなので、入口は広がらない。
+    if: >-
+      github.event.issue.state == 'open' &&
+      github.event.issue.user.login == github.repository_owner &&
+      github.event.issue.author_association == 'OWNER' &&
+      contains(github.event.issue.labels.*.name, '投稿')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write          # 作業ブランチへの push（main へは push しない）
+      issues: write            # Issue に返事を書く
+      pull-requests: write     # プルリクエストを作る
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - name: リポジトリを取り出す
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Python を用意する
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 記事を作り、サイトを組み立て、検査する
+        id: make
+        continue-on-error: true
+        env:
+          # 本文は必ず環境変数で渡す。run: の中に ${{ }} で埋め込むと、
+          # 本文に書かれた文字がコマンドとして実行されてしまう。
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/log.txt"
+          : > "$log"
+          python tools/post_from_issue.py \
+            --json "${RUNNER_TEMP}/post.json" \
+            --pr-body "${RUNNER_TEMP}/pr.md" \
+            --comment "${RUNNER_TEMP}/comment.md" 2>&1 | tee -a "$log"
+          python tools/build.py        2>&1 | tee -a "$log"
+          python tools/check.py --ci   2>&1 | tee -a "$log"
+          python tools/verify.py       2>&1 | tee -a "$log"
+          python tools/selftest.py     2>&1 | tee -a "$log"
+
+      - name: 作れなかったことを Issue に書く
+        if: steps.make.outcome == 'failure'
+        run: |
+          out="${RUNNER_TEMP}/fail.md"
+          if [ -s "${RUNNER_TEMP}/comment.md" ]; then
+            cp "${RUNNER_TEMP}/comment.md" "$out"
+          else
+            {
+              echo "## 記事を作れませんでした"
+              echo ""
+              echo "検査の途中で止まりました。下のログを見てください。"
+            } > "$out"
+          fi
+          {
+            echo ""
+            echo "<details><summary>実行のログ（最後の 80 行）</summary>"
+            echo ""
+            echo '```'
+            tail -n 80 "${RUNNER_TEMP}/log.txt" 2>/dev/null || echo "(ログがありません)"
+            echo '```'
+            echo ""
+            echo "</details>"
+            echo ""
+            echo "直しかたは OPERATIONS.md と MANUAL-cloud-posting.md にあります。"
+          } >> "$out"
+          gh issue comment "$ISSUE_NUMBER" --body-file "$out"
+          echo "::error::記事を作れませんでした。Issue に理由を書きました。"
+          exit 1
+
+      - name: 作業ブランチへ送る
+        id: push
+        run: |
+          branch="post/issue-${ISSUE_NUMBER}"
+          if [ "$branch" = "$DEFAULT_BRANCH" ]; then
+            echo "::error::作業ブランチ名が既定のブランチと同じです。送信を中止します。"
+            exit 1
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "::error::送るものがありません。"
+            exit 1
+          fi
+          slug=$(python -c "import json,sys;print(json.load(open(sys.argv[1],encoding='utf-8'))['slug'])" "${RUNNER_TEMP}/post.json")
+          git commit -m "日記を追加: ${slug}"
+          git push origin "HEAD:refs/heads/${branch}"
+          echo "branch=${branch}" >> "$GITHUB_OUTPUT"
+          echo "slug=${slug}" >> "$GITHUB_OUTPUT"
+
+      - name: プルリクエストを作る
+        id: pr
+        run: |
+          url=$(gh pr list --head "${{ steps.push.outputs.branch }}" --state open --json url --jq '.[0].url // empty')
+          if [ -z "$url" ]; then
+            url=$(gh pr create \
+              --base "$DEFAULT_BRANCH" \
+              --head "${{ steps.push.outputs.branch }}" \
+              --title "日記を追加: ${{ steps.push.outputs.slug }}" \
+              --body-file "${RUNNER_TEMP}/pr.md")
+          fi
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## 記事を作りました"
+            echo ""
+            echo "- 記事: \`/posts/${{ steps.push.outputs.slug }}/\`"
+            echo "- プルリクエスト: ${url}"
+            echo ""
+            echo "Merge すると公開されます。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: できたことを Issue に書く
+        run: |
+          out="${RUNNER_TEMP}/done.md"
+          cp "${RUNNER_TEMP}/comment.md" "$out"
+          {
+            echo ""
+            echo "### 公開するには"
+            echo ""
+            echo "${{ steps.pr.outputs.url }} を開いて **Merge** してください。"
+            echo "数分でサイトに出ます。"
+            echo ""
+            echo "公開したくないときは、そのプルリクエストを **Close** してください。"
+          } >> "$out"
+          gh issue comment "$ISSUE_NUMBER" --body-file "$out"
+          gh issue close "$ISSUE_NUMBER" --reason completed || true

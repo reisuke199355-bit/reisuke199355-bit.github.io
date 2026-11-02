@@ -449,6 +449,29 @@ def check_sources(report, posts, pages):
     if not bad:
         g.ok("本文が指している %d 件のファイルは、すべて実在します" % checked)
 
+    g = report.group("A9. 投稿の受け取り箱（inbox）")
+    # スマホ・クラウドから置かれた TXT が、記事にならずに残っていないか。
+    # 止めるほどのことではないので [注意] にとどめる（作業ブランチでは、
+    # 置いた直後にこの状態になるのがふつう）。
+    inbox = os.path.join(common.ROOT, "inbox")
+    waiting = []
+    if os.path.isdir(inbox):
+        for folder, dirs, names in os.walk(inbox):
+            dirs.sort()
+            for name in sorted(names):
+                if name.lower().endswith(".txt"):
+                    waiting.append(os.path.relpath(os.path.join(folder, name),
+                                                   common.ROOT).replace(os.sep, "/"))
+    if waiting:
+        shown = "、".join(waiting[:5])
+        if len(waiting) > 5:
+            shown += "、ほか %d 件" % (len(waiting) - 5)
+        g.warn("まだ記事になっていない TXT が %d 件あります: %s" % (len(waiting), shown))
+        g.note("手元では python tools/import_inbox.py で記事にできます"
+               "（GitHub では、作業ブランチへ置くと自動で記事になります）")
+    else:
+        g.ok("受け取り箱に、取り込み待ちの TXT はありません")
+
 
 # ---------------------------------------------------------------- B. 公開済みの記録
 
