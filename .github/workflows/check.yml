@@ -27,8 +27,12 @@ concurrency:
   group: check-${{ github.ref }}
   cancel-in-progress: true
 
+# ジョブの識別子（jobs: の直下の名前）は、英字か _ で始まり、
+# 英数字・ハイフン・下線だけで書く決まりがある。日本語にすると
+# ワークフロー自体が読み込めず、0秒で失敗する。
+# 画面に出る名前は name: のほうなので、そちらは日本語のままでよい。
 jobs:
-  検査:
+  check:
     name: 記事と公開物の点検
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -82,7 +86,7 @@ jobs:
             echo "- 公開してはいけないファイルを入れた → .gitignore を直し \`git rm --cached\` で外す"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  公開経路の記録:
+  publish-route:
     name: どこから公開されたかの記録
     # main への push のときだけ動く。失敗はさせない（記録するだけ）。
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
