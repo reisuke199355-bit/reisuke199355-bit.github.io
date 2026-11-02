@@ -141,7 +141,7 @@ GitHub Pages で公開
 | ワークフロー | いつ動くか | 何をするか |
 |---|---|---|
 | `.github/workflows/post-from-inbox.yml` | 作業ブランチの `inbox/` に push | 記事づくり → 検査 → プルリクエスト |
-| `.github/workflows/post-from-issue.yml` | 持ち主が「投稿」Issue を作る | 同上 |
+| `.github/workflows/post-from-issue.yml` | **いまは止めてある**（戻すまで動かない） | 同上 |
 | `.github/workflows/post-rehearsal.yml` | `tools/` などを変えたとき | 投稿の仕組みの予行演習（書き込みの権限なし） |
 
 > このリポジトリは公開リポジトリです。GitHub に渡した文章は、

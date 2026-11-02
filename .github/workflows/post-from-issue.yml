@@ -20,9 +20,30 @@
 #   - 権限は必要なものだけ与える
 name: 投稿フォームから記事を作る
 
+# ----------------------------------------------------------------------
+# この入口は、いま止めてあります。
+#
+# 公開リポジトリの Issue を日記の入口にしてよいかどうかを、持ち主が
+# 確かめ終えるまで動かさない、という判断です。
+# ファイルを消さずに残しているのは、設計と自動テスト（CloudSafety）を
+# そのまま保つため。止めているのは起動の条件だけで、中の作りは
+# いっさい変えていません。
+#
+# もう一度動かすときは、下の2行を次の3行に置き換えてください。
+#   issues:
+#     types: [opened, edited, reopened, labeled]
+#
+# そのうえで、次の2つがそろって初めて使えるようになります。
+#   ・この変更が main に入っていること（Issue の入口は main 側だけが効く）
+#   ・Settings → Actions → General → Workflow permissions で
+#     「Allow GitHub Actions to create and approve pull requests」が
+#     入っていること（入っていないとプルリクエストを作れません）
+#
+# なお workflow_dispatch から手で動かしても、下の if: が
+# github.event.issue を見ているため、何もせずに終わります。
+# ----------------------------------------------------------------------
 on:
-  issues:
-    types: [opened, edited, reopened, labeled]
+  workflow_dispatch:
 
 # 既定は読み取りだけ。必要な権限は job 側で足す。
 permissions:
