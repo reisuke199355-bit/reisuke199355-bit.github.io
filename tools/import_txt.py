@@ -15,13 +15,19 @@
 
 TXT の書き方:
     ファイル名に日付を入れる（2026-11-01.txt / 20261101.txt / 2026年11月1日.txt）。
+    日付を入れない自由な名前（ローカルテスト.txt など）でもよい。
+    そのときは、そのファイルを名指しで渡したときだけ取り込み、
+    取り込んだ日（日本時間）の日記になる。
     1行目を「# タイトル」にすると、その行がタイトルになる。
+    見出しが無く、名前に日付も無いときは、ファイル名がそのまま題になる。
     「タグ: AI, 料理」の行を書くとタグが付く（省略可）。
     空行で段落が分かれ、段落内の改行はそのまま改行として表示される。
 
 取り込まないもの（まちがいを防ぐため）:
-    ファイル名に日付が入っていないもの（--更新日時を使う で取り込める）
-    説明書・使い方・メモ・README などの名前のもの（--強制取り込み で取り込める）
+    まとめて見たときに、ファイル名に日付が入っていないもの
+    （そのファイルを名指しで渡すか、--更新日時を使う を付ける）
+    説明書・使い方・メモ・README などの名前のもの（--強制取り込み で取り込める。
+    その語がカテゴリー名にも入っているときは、名前を疑わない）
     登録済みカテゴリー以外のフォルダに入っているもの（その場で登録を尋ねる）
     .txt 以外、大きすぎるもの、文字化けしているもの、本文が空のもの
     すでにある記事と本文が同じもの（--force で入れ直せる）
@@ -43,6 +49,9 @@ import rules
 common.use_utf8_stdout()
 
 DONE_DIR_NAME = "_取り込み済み"
+
+# 画面の案内で名前を出す BAT（プロジェクトの根にある）。
+IMPORT_BAT = "1_日記を取り込む.bat"
 
 # ファイル名から日付を読む決まりは rules.py に置いてある（検査側と揃えるため）。
 date_from_name = rules.date_from_name
@@ -92,6 +101,27 @@ def skip(label, reason, hint=None):
     if hint:
         for line in hint.split("\n"):
             print("             %s" % line)
+
+
+def expected_in_category(name, category):
+    """名前の「記事らしくない語」が、すべてカテゴリー名にも入っているか。
+
+    「テスト」というカテゴリーを作った人が「ローカルテスト.txt」を置くのは
+    まちがいではない。その置き場所では「テスト」という語に意味が無いので、
+    名前を疑う根拠から外す。
+
+    「使い方のテスト.txt」のように、カテゴリー名に無い語（使い方）も
+    入っていれば、これまでどおり見送る。
+    編集ソフトの控えの名前（~$ や「- コピー」）は、語ではなく形で分かる。
+    カテゴリー名とは関係がないので、ここでは見逃さない。
+    """
+    base = os.path.basename(name or "")
+    stem = os.path.splitext(base)[0]
+    if rules.TEMP_NAME.search(stem) or rules.TEMP_NAME.search(base):
+        return False
+    words = rules.non_article_words(name)
+    low = (category or "").lower()
+    return bool(words) and all(w.lower() in low for w in words)
 
 
 def collect(args, cfg):
@@ -277,10 +307,12 @@ def skip_hint(plan, today):
         "too-long": "日記として取り込むなら --強制取り込み を付けてください。",
         "same-body": "入れ直すなら --force を付けてください。",
         "same-source": "書き直したものに差し替えるなら --force を付けてください。",
-        "no-date": "例: %s.txt / %s.txt / %d年%d月%d日.txt\n"
+        "no-date": "日付を入れた名前にする（例: %s.txt / %s.txt / %d年%d月%d日.txt）か、\n"
+                   "この TXT だけを %s にドラッグ＆ドロップしてください\n"
+                   "（そのときは、きょうの日付の日記になります）。\n"
                    "ファイルの更新日時を使うなら --更新日時を使う を付けてください。"
                    % (today.isoformat(), today.strftime("%Y%m%d"),
-                      today.year, today.month, today.day),
+                      today.year, today.month, today.day, IMPORT_BAT),
         "date-out-of-range": "この日付で取り込むなら --強制取り込み を付けてください。",
         "unknown-category": "config.json の categories に足すか、"
                             "--新カテゴリー許可 を付けてください。",
@@ -308,6 +340,9 @@ def main():
     allow_new = any(a in ("--新カテゴリー許可", "--allow-new-category") for a in args)
     use_mtime = any(a in ("--更新日時を使う", "--use-file-time") for a in args)
     force_import = any(a in ("--強制取り込み", "--force-import") for a in args)
+    # 名指しで渡された TXT があるか。BAT へのドラッグ＆ドロップもここに入る。
+    # 「本人がこのファイルを選んだ」ことの印として、日付の決め方に使う。
+    chosen = bool([a for a in args if not a.startswith("--")])
     cfg = common.load_config()
     default_cat = cfg.get("default_category") or "日記"
     cat_map = cfg.get("category_slug_map", {})
@@ -337,7 +372,10 @@ def main():
           % (len(files), "（確認のみ）" if dry_run else ""))
     imported = skipped = 0
     already = []
-    today = datetime.date.today()
+    # 「きょう」は日本時間で数える（ingest.local_today と同じ決まり）。
+    # パソコンの時計が別の国に合っていても、日記の日付がずれない。
+    # ファイルの作成日・更新日は使わない（--更新日時を使う を付けたときだけ）。
+    today = ingest.local_today(cfg)
 
     for path, category in files:
         name = os.path.basename(path)
@@ -351,7 +389,8 @@ def main():
             continue
 
         non_article = rules.non_article_name(name)
-        if non_article and not force_import:
+        if non_article and not force_import \
+                and not expected_in_category(name, category):
             skip(label, non_article,
                  "日記として取り込むなら --強制取り込み を付けてください。")
             skipped += 1
@@ -374,21 +413,45 @@ def main():
 
         title, tags, body_text = split_header(text)
 
+        # 見出しが無いときの題。日付を入れていない名前なら、その名前を題にする。
+        # 「ローカルテスト.txt」が「2026年11月3日」という題になってしまうと、
+        # せっかく名前を付けた意味がない。
+        # 日付を入れた名前（2026-11-01.txt など）のときは、ここでは何もしない。
+        # これまでどおり ingest.py が「2026年11月1日」の形の題を付ける。
+        if not title and date_from_name(name) is None:
+            title = os.path.splitext(name)[0].strip() or None
+
         def resolve_day(_path=path, _label=label, _name=name, _title=title):
             """日付を決める。二重投稿の見分けが済んだあとに呼ばれる。
 
             取り込み済みのものは、日付が読めなくても黙って見送る。
             この順番を保つため、日付を決めるのはここまで待つ。
+
+            日付の決め方は、上から順に次のとおり。
+              1. ファイル名の日付（2026-11-01.txt など）
+              2. 本文1行目の日付（「# 2026年11月1日」など）
+              3. --更新日時を使う を付けたときだけ、ファイルの更新日時
+              4. 名指しで渡された TXT なら、取り込んだ日（日本時間）
+
+            4 は、まとめて見るときには使わない。カテゴリーのフォルダに
+            置いたままの TXT が、置いた覚えのない日付で記事になってしまう
+            のを防ぐため。日付を必須にしていたのは、もともとこの事故を
+            防ぐためなので、「本人がこのファイルを選んだ」ときだけに
+            限って受け入れる。この決まりは selftest.py の test_32 が見張る。
             """
             day = date_from_name(_name) or date_from_name(_title or "")
             if day is not None:
                 return day, None
-            if not use_mtime:
+            if use_mtime:
+                day = datetime.date.fromtimestamp(os.path.getmtime(_path))
+                print("  [注意] %s から日付を読み取れないため、更新日時 %s を使います。"
+                      % (_label, day.isoformat()))
+                return day, None
+            if not chosen:
                 return None, "ファイル名に日付が入っていません。"
-            day = datetime.date.fromtimestamp(os.path.getmtime(_path))
-            print("  [注意] %s から日付を読み取れないため、更新日時 %s を使います。"
-                  % (_label, day.isoformat()))
-            return day, None
+            print("  [注意] %s に日付が入っていないため、きょう（%s）の日記にします。"
+                  % (_label, today.isoformat()))
+            return today, None
 
         plan = catalog.plan(title=title, body_text=body_text, category=category,
                             tags=tags, source="txt", source_name=name,

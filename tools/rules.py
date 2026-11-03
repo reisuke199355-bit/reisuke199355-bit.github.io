@@ -200,6 +200,18 @@ def non_article_name(filename):
     return None
 
 
+def non_article_words(filename):
+    """ファイル名に入っている「記事らしくない語」をすべて返す。
+
+    non_article_name() は、最初に当たった語で理由を1つ返す。
+    こちらは当たった語そのものを返すので、呼び出し側で
+    「その語は、この置き場所なら当たり前か」を考えられる。
+    """
+    stem = os.path.splitext(os.path.basename(filename or ""))[0]
+    low = stem.lower()
+    return [w for w in NON_ARTICLE_WORDS if w.lower() in low]
+
+
 def doc_like_body(body_text):
     """本文が説明書らしいか。当てはまった語の一覧を返す。"""
     return [w for w in DOC_BODY_WORDS if w in (body_text or "")]
