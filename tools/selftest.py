@@ -35,6 +35,33 @@ IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc")
 
 NEW_POST = "2026年11月02日\n\n今日は自動検査の仕組みを作った。\nうまく動いてくれるとよい。\n"
 
+# ---- 試験が使う日付 ----
+#
+# この試験は、実物のリポジトリを丸ごと複製したひな型の上で動く。
+# だから「実物に何が入っているか」で結果が変わってしまう余地がある。
+# 実際に 2026-11-03 の日記を inbox に置いた日、10 件の試験が落ちた。
+# 理由は2つあり、どちらも日付の決め打ちが元だった。
+#
+#   ・同じ名前（2026-11-03.txt）から取り込んだ記事がもうあると、
+#     二重投稿の防止が働いて、試験の取り込みそのものが拒否される
+#   ・同じ日付の記事がもうあると、取り込みは別名（-2）に逃げるので、
+#     決め打ちのパスを読む試験が、自分の記事ではなく既存の記事を読む
+#
+# そこで日付を2つに分けて宣言し、ひな型を作るときに下ごしらえする。
+# 試験で新しい日付を使うときは、必ずどちらかに足すこと。
+# 足し忘れは test_132 が見つける。
+
+# 「その日の記事はまだ無い」ことを前提にしている日付。
+# ひな型からこの日付の記事を外してから、試験を始める。
+RESERVED_TEST_DATES = ("2026-11-02", "2026-11-03", "2026-11-04")
+
+# 「その日の記事はもうある」ことを前提にしている、または記事があっても
+# 困らない日付。ひな型にはそのまま残す。
+KNOWN_OCCUPIED_DATES = ("2026-10-30", "2026-11-01")
+
+# 試験が名指しで読む記事。ひな型に無ければ、そこで止めて知らせる。
+REQUIRED_TEMPLATE_POSTS = ("2026-10-30.html",)
+
 
 def run(cwd, script, *args, stdin="", env=None):
     """ツールを動かして結果を返す。画面入力は与えた文字列だけ。
@@ -92,6 +119,72 @@ def manifest_state(root):
     return (info.st_size, info.st_mtime_ns, digest)
 
 
+def posts_by_date(blog):
+    """記事を、日記の日付ごとにまとめて返す。
+
+    値は (パス, フロントマター) の一覧。日付が読めないものは "" に入る。
+    """
+    out = {}
+    posts = os.path.join(blog, "content", "posts")
+    for folder, dirs, names in os.walk(posts):
+        dirs.sort()
+        for name in sorted(names):
+            if not name.endswith(".html"):
+                continue
+            path = os.path.join(folder, name)
+            with open(path, encoding="utf-8") as f:
+                meta = common.parse_front_matter(f.read())[0]
+            day = str(meta.get("diary_date") or meta.get("date") or "")[:10]
+            out.setdefault(day, []).append((path, meta))
+    return out
+
+
+def strip_pending_inbox(blog):
+    """inbox から、まだ記事になっていない TXT を取り除く。
+
+    inbox の TXT は「これから記事にするもの」なので、ひな型に持ち込むと、
+    試験が置いた TXT と一緒に取り込まれてしまう。
+    「これは取り込まないこと」を見る試験が、それで壊れる。
+    README.md などの案内は残す。取り除いた数を返す。
+    """
+    removed = 0
+    for folder, dirs, names in os.walk(os.path.join(blog, "inbox")):
+        dirs.sort()
+        for name in sorted(names):
+            if name.lower().endswith(".txt"):
+                os.remove(os.path.join(folder, name))
+                removed += 1
+    return removed
+
+
+def free_reserved_dates(blog, dates=RESERVED_TEST_DATES):
+    """試験が「まだ無い」前提で使う日付の記事を取り除く。
+
+    移行してきた記事（legacy_url を持つもの）は取り除かない。
+    旧URLの転送先になっているので、消すと verify.py が通らなくなる。
+    そういう日付を予約してしまったときは、ここで止めて知らせる。
+    取り除いたファイルの、posts からの相対パスの一覧を返す。
+    """
+    posts = os.path.join(blog, "content", "posts")
+    wanted = set(dates)
+    removed = []
+    for day, items in sorted(posts_by_date(blog).items()):
+        if day not in wanted:
+            continue
+        for path, meta in items:
+            rel = os.path.relpath(path, posts).replace(os.sep, "/")
+            if meta.get("legacy_url"):
+                raise RuntimeError(
+                    "試験が使う日付 %s に、移行してきた記事があります（%s）。\n"
+                    "この記事は旧URLの転送先なので、外すと verify.py が"
+                    "通りません。\n"
+                    "selftest.py の RESERVED_TEST_DATES からこの日付を外し、\n"
+                    "試験のほうで別の日付を使ってください。" % (day, rel))
+            os.remove(path)
+            removed.append(rel)
+    return removed
+
+
 def setUpModule():
     """ひな型を1回だけ作る（毎回ビルドすると遅いため）。"""
     global TEMPLATE
@@ -104,6 +197,16 @@ def setUpModule():
             shutil.copytree(src, os.path.join(blog, name), ignore=IGNORE)
     os.makedirs(os.path.join(blog, "inbox"), exist_ok=True)
     shutil.copy2(os.path.join(ROOT, "config.json"), blog)
+    # 実物の中身に左右されないように、組み立てる前に下ごしらえする
+    # （上の「試験が使う日付」の覚え書きを見てください）。
+    strip_pending_inbox(blog)
+    free_reserved_dates(blog)
+    for name in REQUIRED_TEMPLATE_POSTS:
+        if not os.path.exists(os.path.join(blog, "content", "posts", name)):
+            raise RuntimeError(
+                "試験が名指しで読む記事がありません: content/posts/%s\n"
+                "この記事を消したのなら、それを読んでいる試験も直して"
+                "ください。" % name)
     docs = os.path.join(blog, "docs")
     os.makedirs(docs)
     for prefix in ("images", "assets"):
@@ -1444,6 +1547,154 @@ class CloudSafety(unittest.TestCase):
                 "この試験に効き目がありません（差し込みが起きていません）")
         finally:
             shutil.rmtree(box, ignore_errors=True)
+
+
+# ------------------------------- この試験そのものの土台の決まり（V02）
+
+class Harness(Base):
+    """この試験が、実物のリポジトリの中身に左右されないこと。
+
+    2026-11-03 の日記を inbox に置いた日、ひな型に「取り込み待ちの TXT」と
+    「その日の記事」が入り込み、10 件の試験が落ちた。
+    記事は正しく作れていたのに、検査が落ちたせいで公開が止まった。
+    同じことが二度起きないように、ひな型の下ごしらえを見張る。
+    """
+
+    def template(self, *parts):
+        return os.path.join(TEMPLATE, "blog", *parts)
+
+    def test_130_the_template_has_no_pending_inbox_txt(self):
+        """ひな型の inbox に、取り込み待ちの TXT が残っていないこと。"""
+        inbox = self.template("inbox")
+        left = []
+        for folder, dirs, names in os.walk(inbox):
+            dirs.sort()
+            for name in sorted(names):
+                if name.lower().endswith(".txt"):
+                    left.append(os.path.relpath(os.path.join(folder, name),
+                                                inbox).replace(os.sep, "/"))
+        self.assertEqual(
+            [], left,
+            "ひな型に取り込み待ちの TXT が入っています。試験が置いた TXT と"
+            "一緒に取り込まれ、「取り込まないこと」の試験が壊れます。")
+
+    def test_131_the_template_is_prepared_as_intended(self):
+        """ひな型の日付の下ごしらえが、思ったとおりになっていること。"""
+        found = posts_by_date(self.template())
+        for day in RESERVED_TEST_DATES:
+            self.assertNotIn(
+                day, found,
+                "%s の記事がひな型に残っています"
+                "（RESERVED_TEST_DATES なので外すはずです）" % day)
+        for name in REQUIRED_TEMPLATE_POSTS:
+            self.assertTrue(
+                os.path.exists(self.template("content", "posts", name)),
+                "試験が名指しで読む記事がありません: content/posts/%s" % name)
+
+    def test_132_every_fixture_date_is_accounted_for(self):
+        """試験が使う日付が、すべてどちらかの一覧に入っていること。
+
+        新しい日付の TXT を試験に足したとき、一覧への足し忘れを見つける。
+        ブログの範囲外の日付（2099-01-01 など）は、そもそも取り込まれず
+        記事にならないので見送る。
+        """
+        with open(os.path.join(ROOT, "tools", "selftest.py"),
+                  encoding="utf-8") as f:
+            src = f.read()
+        patterns = (
+            r'\.put\(\s*"[^"]*"\s*,\s*"([^"]+)"',
+            r'\.put_bytes\(\s*"[^"]*"\s*,\s*"([^"]+)"',
+            r'\.put_inbox\(\s*"([^"]+)"',
+            r'\bday="([^"]*)"',
+        )
+        known = set(RESERVED_TEST_DATES) | set(KNOWN_OCCUPIED_DATES)
+        seen = set()
+        for pattern in patterns:
+            for m in re.finditer(pattern, src):
+                name = m.group(1)
+                day = rules.date_from_name(name)
+                if not day or rules.date_in_range(day):
+                    continue
+                seen.add(day.isoformat())
+                self.assertIn(
+                    day.isoformat(), known,
+                    "試験が %r で %s を使っていますが、どちらの一覧にも"
+                    "入っていません。RESERVED_TEST_DATES（その日の記事は"
+                    "まだ無い前提）か KNOWN_OCCUPIED_DATES（記事があっても"
+                    "困らない）に足してください。"
+                    % (name, day.isoformat()))
+        self.assertTrue(
+            seen,
+            "日付つきの TXT が1つも見つかりませんでした"
+            "（この試験の探し方が古くなっています）")
+        for day in RESERVED_TEST_DATES:
+            self.assertIn(
+                day, seen,
+                "%s は予約されていますが、どの試験も使っていません。"
+                "要らなくなったら RESERVED_TEST_DATES から外してください。"
+                % day)
+
+    def test_133_the_preparation_removes_what_the_repo_carries(self):
+        """実物に取り込み待ちの TXT と予約日付の記事があっても、外せること。
+
+        2026-11-03 の日記を置いた日に起きたことを、ここで作って確かめる。
+        """
+        box = tempfile.mkdtemp(prefix="blog-harness-")
+        self.addCleanup(shutil.rmtree, box, True)
+
+        def put(text, *parts):
+            path = os.path.join(box, *parts)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+
+        def article(day, extra=""):
+            return ("---\ntitle: %s\ndate: %s 21:00:00\nslug: %s\n"
+                    "diary_date: %s\ncategories: [日記]\ntags: []\n%s"
+                    "---\n\n<p>本文</p>\n" % (day, day, day, day, extra))
+
+        put("置き方の案内\n", "inbox", "README.md")
+        put("きょうの日記\n", "inbox", "2026-11-03.txt")
+        put("きょうの感想\n", "inbox", "感想", "2026-11-03.txt")
+        put(article("2026-11-03"), "content", "posts", "2026-11-03.html")
+        put(article("2026-11-03"), "content", "posts", "感想",
+            "2026-11-03.html")
+        put(article("2026-10-30"), "content", "posts", "2026-10-30.html")
+
+        self.assertEqual(2, strip_pending_inbox(box),
+                         "取り込み待ちの TXT を外せていません")
+        self.assertTrue(
+            os.path.exists(os.path.join(box, "inbox", "README.md")),
+            "案内の README.md まで消してしまっています")
+
+        self.assertEqual(["2026-11-03.html", "感想/2026-11-03.html"],
+                         sorted(free_reserved_dates(box)),
+                         "予約日付の記事を外せていません")
+        self.assertTrue(
+            os.path.exists(os.path.join(box, "content", "posts",
+                                        "2026-10-30.html")),
+            "予約していない日付の記事まで消してしまっています")
+
+    def test_134_a_reserved_date_on_a_migrated_article_stops_the_run(self):
+        """移行してきた記事の日付を予約してしまったら、止めて知らせること。
+
+        旧URLの転送先を黙って消すと verify.py が通らなくなるので、
+        消さずに止める。
+        """
+        box = tempfile.mkdtemp(prefix="blog-harness-")
+        self.addCleanup(shutil.rmtree, box, True)
+        path = os.path.join(box, "content", "posts", "2026-11-03.html")
+        os.makedirs(os.path.dirname(path))
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("---\ntitle: むかしの記事\ndate: 2026-11-03 21:00:00\n"
+                    "slug: 2026-11-03\ndiary_date: 2026-11-03\n"
+                    "categories: [日記]\ntags: []\n"
+                    "legacy_url: /2026/11/03/old/\n---\n\n<p>本文</p>\n")
+        with self.assertRaises(RuntimeError) as caught:
+            free_reserved_dates(box)
+        self.assertIn("旧URLの転送先", str(caught.exception))
+        self.assertTrue(os.path.exists(path),
+                        "止めると言いながら消してしまっています")
 
 
 if __name__ == "__main__":
