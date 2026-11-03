@@ -315,6 +315,21 @@ class Base(unittest.TestCase):
         self.assertEqual(result.returncode, 0,
                          "通るはずが止まりました:\n%s\n%s" % (result.stdout, result.stderr))
 
+    def imported(self, box, result):
+        """いま取り込んだ記事を1件読む。画面に出た URL をたどる。
+
+        記事の置き場所を決め打ちにしない。実物に同じ日の記事があると、
+        取り込みは別名（-2）に逃げるので、決め打ちでは読めなくなる。
+        戻り値は (URL, フロントマター)。
+        """
+        slugs = re.findall(r"→ /posts/(\S+)/", result.stdout or "")
+        self.assertEqual(1, len(slugs),
+                         "取り込んだ記事が1件だけ出るはずです:\n%s" % result.stdout)
+        parts = slugs[0].split("/")
+        parts[-1] += ".html"
+        return slugs[0], common.parse_front_matter(
+            box.read("content", "posts", *parts))[0]
+
 
 # ----------------------------------------------------------- 正常系
 
@@ -517,6 +532,100 @@ class NormalUse(Base):
         self.assertIsNone(manifest_state(box.blog),
                           "検査がリポジトリ直下に控えを作りました")
 
+    def test_15_a_free_name_imports_as_today(self):
+        """日付のない自由な名前の TXT を名指しで渡すと、きょうの日記になる。
+
+        「1_日記を取り込む.bat」へのドラッグ＆ドロップが、この形になる。
+        日付はファイルの更新日時ではなく、取り込んだ日（日本時間）を使う。
+        """
+        box = self.sandbox()
+        today = ingest.local_today(common.load_config())
+        path = box.put("日記", "きょうのできごと.txt",
+                       "朝から雨だった。\n\n夕方には晴れた。\n")
+        os.utime(path, (0, 0))          # 更新日時は 1970 年。使われないこと
+        # パソコンの時計が日本に合っていなくても、きょうは日本時間で数える
+        result = run(box.blog, "import_txt.py", path, env={"TZ": "UTC+12"})
+        self.assertOK(result)
+        self.assertIn("[取り込み] 日記 / きょうのできごと.txt", result.stdout)
+        self.assertIn("きょう（%s）" % today.isoformat(), result.stdout)
+        self.assertNotIn("1970", result.stdout)
+        slug, entry = self.imported(box, result)
+        self.assertEqual(entry["diary_date"], today.isoformat())
+        self.assertEqual(entry["date"], "%s 21:00:00" % today.isoformat())
+        self.assertEqual(entry["title"], "きょうのできごと")
+        self.assertEqual(entry["source_file"], "きょうのできごと.txt")
+
+    def test_16_a_heading_wins_over_the_file_name(self):
+        """見出しがあれば、ファイル名ではなく見出しが題になる。"""
+        box = self.sandbox()
+        path = box.put("日記", "なにかの名前.txt",
+                       "# 雨の日のこと\n\n朝から雨だった。\n\n夕方には晴れた。\n")
+        result = run(box.blog, "import_txt.py", path)
+        self.assertOK(result)
+        slug, entry = self.imported(box, result)
+        self.assertEqual(entry["title"], "雨の日のこと")
+
+    def test_17_a_dated_name_keeps_the_japanese_date_title(self):
+        """日付の名前で見出しが無ければ、題は「2026年11月2日」の形のまま。
+
+        ファイル名をそのまま題にする決まりを足したあとも、
+        日付を入れた名前のときは、これまでどおりであること。
+        """
+        box = self.sandbox()
+        box.put("日記", "2026-11-02.txt", "見出しのない日記。\n\n本文です。\n")
+        result = run(box.blog, "import_txt.py")
+        self.assertOK(result)
+        slug, entry = self.imported(box, result)
+        self.assertEqual("2026-11-02", slug)
+        self.assertEqual(entry["title"], "2026年11月2日")
+
+    def test_18_a_bare_line_in_a_new_category_becomes_an_article(self):
+        """見出しも日付もない1行の TXT が、記事になって組み立てまで通ること。
+
+        本人が置いた「テスト／ローカルテスト.txt」と同じ形
+        （本文1行だけ・見出しなし・日付なし・カテゴリーのフォルダ名が
+        そのまま URL に入る）。名前と本文は実物とずらしてある。
+        同じにすると、本人がその TXT をほんとうに取り込んだあと、
+        二重投稿の防止が働いてこの試験が落ちてしまう。
+        """
+        box = self.sandbox()
+        today = ingest.local_today(common.load_config())
+        path = box.put("テスト", "ローカルテストの下見.txt", "ローカルテストの下見")
+        result = run(box.blog, "import_txt.py", path, "--新カテゴリー許可")
+        self.assertOK(result)
+        self.assertNotIn("名前に「テスト」が入っています", result.stdout)
+        slug, entry = self.imported(box, result)
+        # URL は決め打ちにしない。同じ日の記事があると -2 に逃げるため
+        self.assertTrue(slug.startswith("テスト/"), slug)
+        self.assertEqual(entry["title"], "ローカルテストの下見")
+        self.assertEqual(entry["diary_date"], today.isoformat())
+        self.assertEqual(entry["categories"], ["テスト"])
+        self.assertEqual(entry["source"], "txt")
+        self.assertOK(run(box.blog, "build.py"))
+        page = box.read("docs", "posts", *(slug.split("/") + ["index.html"]))
+        self.assertIn("ローカルテストの下見", page)
+        # 検査は注意を出すが、公開を止める問題にはしない
+        check = run(box.blog, "check.py")
+        self.assertOK(check)
+        self.assertIn("もとのファイル名に日付が入っていません", check.stdout)
+
+    def test_19_a_date_in_the_heading_still_sets_the_day(self):
+        """名前に日付が無くても、見出しの日付が投稿日になる（従来どおり）。
+
+        この道は、まとめて取り込むときにも通る。
+        「名指しのときだけ、きょうの日付」の決まりを足したあとも、
+        見出しに日付がある TXT は、これまでどおり取り込めること。
+        """
+        box = self.sandbox()
+        box.put("日記", "なまえだけ.txt",
+                "# 2026年11月04日\n\n見出しに日付を書いた日記。\n")
+        result = run(box.blog, "import_txt.py")
+        self.assertOK(result)
+        slug, entry = self.imported(box, result)
+        self.assertEqual("2026-11-04", slug)
+        self.assertEqual(entry["title"], "2026年11月04日")
+        self.assertEqual(entry["diary_date"], "2026-11-04")
+
 
 # ----------------------------------------------------------- 異常系（取り込み）
 
@@ -672,6 +781,150 @@ class ImportGuards(Base):
         self.assertIn("公開済みとして記録されている記事です", result.stdout)
         self.assertIn("--修正許可", result.stdout)
         self.assertEqual(before, digest(), "公開済みの記事が書き換えられました")
+
+    def test_32_a_free_name_is_not_swept_up_by_a_folder_scan(self):
+        """日付のない名前は、まとめて見るときには取り込まない。
+
+        名指しで渡したときだけ、きょうの日付で取り込む。
+        カテゴリーのフォルダに置いたままの TXT が、置いた覚えのない
+        日付で記事になってしまうのを防ぐため。日付を必須にしていたのは
+        もともとこの事故を防ぐためなので、そこは外していない。
+        """
+        box = self.sandbox()
+        before = box.posts()
+        path = box.put("日記", "あとで書く.txt", "まだ下書き。\n\n書きかけです。\n")
+        scan = run(box.blog, "import_txt.py")
+        self.assertOK(scan)
+        self.assertIn("ファイル名に日付が入っていません", scan.stdout)
+        self.assertEqual(before, box.posts(), "まとめて見たときに取り込まれました")
+        named = run(box.blog, "import_txt.py", path)
+        self.assertOK(named)
+        self.assertIn("[取り込み] 日記 / あとで書く.txt", named.stdout)
+        self.assertNotEqual(before, box.posts(), "名指しでも取り込まれません")
+
+    def test_33_a_test_name_passes_only_in_a_matching_category(self):
+        """「テスト」という語は、カテゴリー名が同じときだけ疑わない。"""
+        box = self.sandbox()
+        before = box.posts()
+        # 名前は実物（ローカルテスト.txt）とずらす。同じにすると、
+        # 本人がそれを取り込んだあと、二重投稿の防止でこの試験が落ちる。
+        body = "ためしに書く。\n\n本文です。\n"
+        path = box.put("日記", "テストの記録.txt", body)
+        result = run(box.blog, "import_txt.py", path)
+        self.assertOK(result)
+        self.assertIn("名前に「テスト」が入っています", result.stdout)
+        self.assertEqual(before, box.posts(), "「日記」で取り込まれました")
+
+        path = box.put("テスト", "テストの記録.txt", body)
+        result = run(box.blog, "import_txt.py", path, "--新カテゴリー許可")
+        self.assertOK(result)
+        self.assertNotIn("名前に「テスト」が入っています", result.stdout)
+        self.assertIn("[取り込み] テスト / テストの記録.txt", result.stdout)
+
+    def test_34_a_manual_name_is_refused_in_a_test_category(self):
+        """カテゴリー名に無い語が入っていれば、やはり見送る。"""
+        box = self.sandbox()
+        before = box.posts()
+        path = box.put("テスト", "使い方のテスト.txt", "説明です。\n\n本文です。\n")
+        result = run(box.blog, "import_txt.py", path, "--新カテゴリー許可")
+        self.assertOK(result)
+        self.assertIn("名前に「使い方」が入っています", result.stdout)
+        self.assertEqual(before, box.posts())
+
+    def test_35_a_copy_name_is_refused_in_a_matching_category(self):
+        """編集ソフトの控えの名前は、カテゴリー名と関係なく見送る。"""
+        box = self.sandbox()
+        before = box.posts()
+        path = box.put("テスト", "テスト - コピー.txt", "控えです。\n\n本文です。\n")
+        result = run(box.blog, "import_txt.py", path, "--新カテゴリー許可")
+        self.assertOK(result)
+        self.assertIn("一時ファイル・控えの名前です", result.stdout)
+        self.assertEqual(before, box.posts())
+
+
+    def test_36_a_free_name_is_not_imported_twice(self):
+        """同じ TXT をもう一度渡しても、二重にならない。
+
+        日付は取り込んだ日なので、日をまたいで入れ直すと別の日の記事に
+        なりかねない。中身を直した TXT でも、勝手に差し替えない。
+        """
+        box = self.sandbox()
+        path = box.put("日記", "二度入れる日記.txt", "一度目の本文。\n\n続きです。\n")
+        self.assertOK(run(box.blog, "import_txt.py", path))
+        after_first = box.posts()
+
+        again = run(box.blog, "import_txt.py", path)
+        self.assertOK(again)
+        self.assertIn("取り込み済みの TXT が 1 件", again.stdout)
+        self.assertEqual(after_first, box.posts(), "同じ TXT で記事が増えました")
+
+        box.put("日記", "二度入れる日記.txt", "書き直した本文。\n\n続きです。\n")
+        edited = run(box.blog, "import_txt.py", path)
+        self.assertOK(edited)
+        self.assertIn("同じ名前で取り込み済みです", edited.stdout)
+        self.assertEqual(after_first, box.posts(), "既存の記事が置き換わりました")
+
+    def test_37_two_free_names_on_the_same_day_do_not_collide(self):
+        """同じ日に自由な名前の TXT を2つ入れても、先の記事を上書きしない。"""
+        box = self.sandbox()
+        morning = box.put("日記", "朝のこと.txt", "朝の本文です。\n\n続きです。\n")
+        night = box.put("日記", "夜のこと.txt", "夜の本文です。\n\n続きです。\n")
+
+        first = run(box.blog, "import_txt.py", morning)
+        self.assertOK(first)
+        first_slug, first_entry = self.imported(box, first)
+        first_file = first_slug.split("/")
+        first_file[-1] += ".html"
+        before = box.read("content", "posts", *first_file)
+
+        second = run(box.blog, "import_txt.py", night)
+        self.assertOK(second)
+        second_slug, second_entry = self.imported(box, second)
+        self.assertNotEqual(first_slug, second_slug)
+        self.assertEqual(first_entry["diary_date"], second_entry["diary_date"])
+        self.assertIn("別の記事として足します", second.stdout)
+        self.assertEqual(before, box.read("content", "posts", *first_file),
+                         "先に入れた記事が書き換えられました")
+
+    def test_38_a_free_name_needs_a_body(self):
+        """中身のない TXT や見出しだけの TXT から、記事を作らない。"""
+        box = self.sandbox()
+        before = box.posts()
+        empty = box.put("日記", "からっぽ.txt", "  \n\n")
+        heading = box.put("日記", "見出しだけ.txt", "# 見出しだけ\n")
+        result = run(box.blog, "import_txt.py", empty, heading)
+        self.assertOK(result)
+        self.assertIn("中身が空です", result.stdout)
+        self.assertIn("本文がありません", result.stdout)
+        self.assertEqual(before, box.posts())
+
+    def test_39_a_free_name_outside_a_category_is_refused(self):
+        """カテゴリーのフォルダの外にある TXT は、名指しでも取り込まない。"""
+        box = self.sandbox()
+        before = box.posts()
+        body = "本文です。\n\n続きです。\n"
+        for path in (os.path.join(box.root, "外の日記.txt"),
+                     os.path.join(box.articles, "直置きの日記.txt")):
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(body)
+        cases = (
+            (os.path.join(box.root, "外の日記.txt"),
+             "記事管理フォルダの外にあります"),
+            (os.path.join("..", "10_記事管理", "日記", "..", "..", "外の日記.txt"),
+             "記事管理フォルダの外にあります"),
+            (os.path.join(box.articles, "直置きの日記.txt"),
+             "カテゴリーのフォルダに入っていません"),
+            (box.put(os.path.join("_取り込み済み", "日記"), "控えの日記.txt", body),
+             "「_」で始まるフォルダ"),
+            (box.put(os.path.join("日記", "奥"), "奥の日記.txt", body),
+             "さらに下にあります"),
+        )
+        for path, expected in cases:
+            with self.subTest(path=path):
+                result = run(box.blog, "import_txt.py", path)
+                self.assertOK(result)
+                self.assertIn(expected, result.stdout)
+                self.assertEqual(before, box.posts())
 
 
 # ----------------------------------------------------------- 異常系（検査）
