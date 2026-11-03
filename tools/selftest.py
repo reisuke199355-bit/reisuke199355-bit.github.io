@@ -25,6 +25,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import common
+import ingest
 import rules
 
 common.use_utf8_stdout()
@@ -1308,6 +1309,25 @@ class CloudPosting(Base):
         self.assertOK(run(box.blog, "build.py"))
         self.assertOK(run(box.blog, "check.py"))
         self.assertOK(run(box.blog, "verify.py"))
+
+    def test_106_the_rehearsal_works_after_a_real_post_today(self):
+        """きょうの日記を inbox から入れたあとでも、予行演習が通ること。
+
+        予行演習は「きょうの日付」で TXT を置く。名前をそのまま
+        <きょう>.txt にすると、本人がきょう inbox から入れた記事と
+        同じ名前になり、二重投稿の防止で止まってしまう。
+        実機で1回通したとき、これで予行演習が落ちた。
+
+        きょうの日付は予約できない（本人がその日の日記を書くのだから）。
+        だから、ここだけは「ぶつかっても通ること」を確かめる。
+        """
+        box = self.sandbox()
+        today = ingest.local_today(common.load_config()).isoformat()
+        box.put_inbox("%s.txt" % today,
+                      "# きょうの日記\n\n本人がきょう入れた日記のつもりです。\n")
+        self.assertOK(run(box.blog, "import_inbox.py"))
+        self.assertOK(run(box.blog, "build.py"))
+        self.assertOK(run(box.blog, "rehearse_post.py"))
 
 
 # ------------------------------------- 投稿の仕組みそのものの決まり（V02）

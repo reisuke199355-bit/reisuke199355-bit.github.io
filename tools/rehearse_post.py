@@ -181,7 +181,14 @@ def rehearse(blog):
                         if p.endswith(".html")])
 
     # ---- 1. inbox から ----
-    inbox_name = "%s.txt" % day.isoformat()
+    # 名前を「<きょう>.txt」にしてはいけない。
+    # 本人がきょう inbox から日記を入れていると、取り込み済みの記事と
+    # 同じ名前になり、二重投稿の防止で止まってしまう
+    # （二重投稿の判定は（カテゴリー, 元のファイル名）で見ている）。
+    # 実機で1回通したとき、これで予行演習が落ちた。
+    # 日付は名前から読まれるので、後ろに目印を付けてもきょうの記事になる。
+    # この決まりは selftest.py の test_106 が見張っている。
+    inbox_name = "%s-予行演習.txt" % day.isoformat()
     with open(os.path.join(blog, "inbox", inbox_name), "w",
               encoding="utf-8", newline="\n") as f:
         f.write(INBOX_TEXT)
