@@ -21,6 +21,36 @@
 
 ---
 
+## スマホから投稿した日の流れ
+
+スマホから投稿して公開（プルリクエストを Merge）すると、
+**GitHub 側だけが新しく**なります。そのまま `3_GitHubへ公開.bat` を
+実行すると、送信のところで断られます。
+
+次の順に進めてください。
+
+1. `5_クラウドの投稿を受け取る.bat`（または `python tools/sync.py`）
+2. あとは、これまでどおり `1` → `2` → `3`
+
+スマホからの投稿の手順そのものは `MANUAL-cloud-posting.md` にあります。
+
+> `5_クラウドの投稿を受け取る.bat` は、`blog/windows/` から
+> `1_日記を取り込む.bat` の並びへコピーして使います。
+
+### クラウドから入った記事を凍結する
+
+クラウドから入った記事は、まだ `baseline.json` に入っていません。
+検査は `新しい記事が N 件` と知らせるだけで、止まりません。
+凍結しておきたくなったら、手元で次を実行してください。
+
+```
+python tools/baseline.py --update
+```
+
+**自動では絶対に更新しません**（凍結の意味がなくなるため）。
+
+---
+
 ## TXT の名前の決まり
 
 ファイル名に日付を入れてください。次のどれでも読めます。
@@ -132,6 +162,7 @@ python tools/check.py
 | もう作られないファイルが公開されたままです | `docs/` に古いページが残っている | 消してよいか確かめて `git rm` で外す |
 | 手で用意した公開ファイルの中身が変わっています | スタイルや画像が差し替わった | 戻す。意図した変更なら `baseline.py --update` |
 | 公開してはいけないファイル | 書庫・鍵・非公開の原稿などが入った | `.gitignore` を直し `git rm --cached` で外す |
+| タグ「○○」は URL に使えません | タグに使えない文字が入っている | TXT の「タグ:」の行を直す |
 | 登録されていないカテゴリー | 見慣れないカテゴリー名の記事がある | `config.json` の `categories` に足す。まちがいなら記事を直す |
 | リンク先がありません | ページ内のリンクが切れている | リンク先の綴りを確かめる |
 | 文字コードが UTF-8 ではありません | メモ帳で「ANSI」保存した | メモ帳で開き、文字コード「UTF-8」で保存し直す |
@@ -171,6 +202,11 @@ GitHub Pages の公開は自動検査とは別に動いています。
 | `python tools/baseline.py --update` | 記録を作り直す（確認つき） |
 | `python tools/baseline.py --修正許可 <URL>` | 過去記事を直すために鍵を開ける |
 | `python tools/import_txt.py --dry-run` | 取り込まず、何が起きるかだけ見る |
+| `python tools/import_inbox.py` | `inbox/` の TXT を記事にする（スマホ・クラウドから） |
+| `python tools/import_inbox.py --残す` | 取り込んだ TXT を `inbox/` に残す |
+| `python tools/rehearse_post.py` | クラウド投稿の予行演習（本番に触らない） |
+| `python tools/sync.py` | クラウドで公開した日記を手元に取り込む |
+| `python tools/sync.py --見るだけ` | どれだけ違うかだけ見る |
 | `python tools/import_txt.py --新カテゴリー許可` | 尋ねずに新カテゴリーを登録して取り込む |
 | `python tools/import_txt.py --強制取り込み` | 名前や日付の決まりを外して取り込む |
 | `python tools/import_txt.py --更新日時を使う` | ファイルの更新日時を日付として使う |
@@ -180,6 +216,9 @@ GitHub Pages の公開は自動検査とは別に動いています。
 
 ## やってはいけないこと
 
+- **書きかけの下書きを GitHub に置く**
+  （このリポジトリは公開です。Issue も作業ブランチも、置いた瞬間に第三者が読めて、
+  あとから消せません。下書きは端末の中に置いてください）
 - `docs/` を手で編集する（`build.py` が作り直すので消えます）
 - `baseline.json` を手で編集する（`baseline.py --update` を使ってください）
 - 旧URLの転送ページ（`docs/` 直下の日本語フォルダ）を消す
@@ -189,12 +228,94 @@ GitHub Pages の公開は自動検査とは別に動いています。
 
 ---
 
-## 参考：もっと厳しくしたいとき
+## 参考：main のブランチ保護（いまは設定していません）
 
-いまは `main` へ直接 push できます（`3_GitHubへ公開.bat` がそうしているため）。
-将来、ツールの変更だけを必ずレビューしてから入れたくなったら、
-GitHub の **Settings → Branches** でブランチ保護を設定できます。
+V02 の安全性検査で、こういうことが分かりました。
 
-ただし保護をかけると `3_GitHubへ公開.bat` での公開ができなくなるので、
-**日記の投稿方法を先に変えてから**にしてください。
-入れ替えの道筋は `DESIGN-cloud-posting.md` に書いてあります。
+> Actions に渡す `contents: write` は**リポジトリ全体に効く権限**で、
+> 「この作業ブランチだけ」には絞れない。
+
+ワークフロー側は作業ブランチにしか push せず、送信先が既定ブランチと
+同じ名前なら中止する作りになっています。それでもトークン自体は
+`main` へ push できる形なので、ここを締めるにはブランチ保護が要る、
+という話になりました。
+
+**ただし、いまは設定していません。** 設定の仕方を間違えると
+`3_GitHubへ公開.bat` で公開できなくなるからです。
+
+### 何が壊れるのか
+
+`3_GitHubへ公開.bat` は、中で `publish.py` が
+`git push -u origin main` を直接実行しています。
+`main` に「プルリクエストを必須にする」保護がかかり、
+**それが自分にも適用されると、この push が拒否されて公開できなくなります。**
+
+### 安全な順序
+
+GitHub の決まりでは、**リポジトリの管理者（個人リポジトリの持ち主）には、
+既定でブランチ保護の制限がかかりません。**
+
+> the restrictions of a branch protection rule don't apply to people
+> with admin permissions to the repository
+
+管理者にも適用するための設定が **Do not allow bypassing the above settings**
+で、これは既定で**入っていません**。だから順序はこうなります。
+
+1. **Settings → Branches → Add branch protection rule**
+   - Branch name pattern に `main`
+   - **Require a pull request before merging** を入れる
+   - **Do not allow bypassing the above settings** は**入れない**
+2. そのまま `3_GitHubへ公開.bat` を1回実行し、**公開できることを確かめる**
+3. それから、Actions が `main` へ push できなくなったかを確かめる
+
+**手順2を飛ばさないでください。** 保護はあとから消せますが、
+公開できなくなったことに気づかないまま日記を書き続けるのが、いちばん困ります。
+うまくいかなければ、その保護ルールを消せば元に戻ります。
+
+### 確かめようがない点（正直に書いておきます）
+
+手順3の「Actions が `main` へ push できなくなったか」は、
+**GitHub の公式ドキュメントに書かれていません。**
+
+`GITHUB_TOKEN` は GitHub App のトークンです。保護ブランチの説明は
+"people with admin permissions" を主語にしていて、App のトークンが
+同じ扱いになるのかは書かれていません。
+（"People **and apps** with admin permissions to a repository are always
+able to push to a protected branch" という書き方もあり、どちらとも読めます。）
+
+ですから、**ブランチ保護を「Actions を止める仕組み」として当てにしないでください。**
+いま実際に Actions を `main` から遠ざけているのは、次の3つです。
+
+| 仕組み | 見張っている試験 |
+|---|---|
+| ワークフローが `main` へ push していない | `test_110` |
+| `permissions:` が既定で `contents: read`、必要な job にだけ足す | `test_113` |
+| 送信先が既定ブランチと同じ名前なら中止する（`DEFAULT_BRANCH` の確認） | `test_110` |
+
+ブランチ保護は、この上に重ねる4枚目です。
+効くかどうかを知りたければ、保護をかけたあとに一度試すしかありません。
+
+### 個人リポジトリでの制限
+
+- クラシックな保護では、**特定の人を例外リストに入れることはできません。**
+
+  > Actors may only be added to bypass lists when the repository belongs
+  > to an organization.
+
+  Organization のリポジトリだけの機能です。だから「持ち主だけ例外」は、
+  例外リストではなく**「管理者には既定で適用されない」という性質**で実現します。
+- 新しい **Rulesets** では、例外リスト（Bypass list）に
+  "Repository admins" を入れられます。ただし個人アカウントの Public
+  リポジトリで使えるかは、公式ページからは読み取れませんでした。
+  画面に出てこなければ、クラシックな保護のほうを使ってください。
+
+### 日記もプルリクエスト経由に寄せる場合
+
+「日記もツールの変更も、すべてプルリクエスト経由」にするなら、
+`3_GitHubへ公開.bat` で直接公開するのをやめ、`inbox/` 方式
+（`MANUAL-cloud-posting.md` の 3-A）に寄せます。
+そうすれば **Do not allow bypassing the above settings** まで入れられます。
+
+その場合、手元で書いた TXT も `inbox/` に置いて作業ブランチへ push し、
+プルリクエストを Merge して公開する流れになります。
+乗り換えの道筋は `DESIGN-cloud-posting.md` にあります。

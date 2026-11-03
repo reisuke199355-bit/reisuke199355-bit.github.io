@@ -1,0 +1,12 @@
+# Issue の入口の出し方。
+#
+# blank_issues_enabled: true は「テンプレートを使わない Issue も作れる」。
+# いまはこれで合っている。投稿フォーム（post.yml）は安全の確かめが
+# 済むまで止めてあるので、false にすると Issues タブから何も作れなくなり、
+# 自分用の覚え書きも置けなくなってしまう。
+#
+# 覚えておくこと: この設定が決めるのは「空の Issue を出すかどうか」だけ。
+# false にしても、第三者が Issue を作れなくなるわけではない
+# （テンプレートからは作れる）。Issue そのものを使わせたくないときは、
+# Settings → General → Features の Issues のチェックを外す。
+blank_issues_enabled: true

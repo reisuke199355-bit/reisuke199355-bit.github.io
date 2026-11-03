@@ -192,6 +192,10 @@ def main():
     if result.returncode != 0:
         print("\n送信に失敗しました。GitHub の認証やリポジトリのアドレスを確認してください。")
         print("コミットは手元に残っているので、直してからもう一度実行できます。")
+        print("\nスマホから投稿した日記を GitHub 側で公開したあとは、")
+        print("先に GitHub の最新を取り込む必要があります。次のどちらかを実行してください。")
+        print("  「5_クラウドの投稿を受け取る.bat」")
+        print("  python tools/sync.py")
         return 1
 
     print("\n公開しました。")

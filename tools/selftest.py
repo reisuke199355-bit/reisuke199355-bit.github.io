@@ -16,6 +16,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,6 +25,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import common
+import ingest
 import rules
 
 common.use_utf8_stdout()
@@ -34,13 +36,48 @@ IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc")
 
 NEW_POST = "2026年11月02日\n\n今日は自動検査の仕組みを作った。\nうまく動いてくれるとよい。\n"
 
+# ---- 試験が使う日付 ----
+#
+# この試験は、実物のリポジトリを丸ごと複製したひな型の上で動く。
+# だから「実物に何が入っているか」で結果が変わってしまう余地がある。
+# 実際に 2026-11-03 の日記を inbox に置いた日、10 件の試験が落ちた。
+# 理由は2つあり、どちらも日付の決め打ちが元だった。
+#
+#   ・同じ名前（2026-11-03.txt）から取り込んだ記事がもうあると、
+#     二重投稿の防止が働いて、試験の取り込みそのものが拒否される
+#   ・同じ日付の記事がもうあると、取り込みは別名（-2）に逃げるので、
+#     決め打ちのパスを読む試験が、自分の記事ではなく既存の記事を読む
+#
+# そこで日付を2つに分けて宣言し、ひな型を作るときに下ごしらえする。
+# 試験で新しい日付を使うときは、必ずどちらかに足すこと。
+# 足し忘れは test_132 が見つける。
 
-def run(cwd, script, *args, stdin=""):
-    """ツールを動かして結果を返す。画面入力は与えた文字列だけ。"""
+# 「その日の記事はまだ無い」ことを前提にしている日付。
+# ひな型からこの日付の記事を外してから、試験を始める。
+RESERVED_TEST_DATES = ("2026-11-02", "2026-11-03", "2026-11-04")
+
+# 「その日の記事はもうある」ことを前提にしている、または記事があっても
+# 困らない日付。ひな型にはそのまま残す。
+KNOWN_OCCUPIED_DATES = ("2026-10-30", "2026-11-01")
+
+# 試験が名指しで読む記事。ひな型に無ければ、そこで止めて知らせる。
+REQUIRED_TEMPLATE_POSTS = ("2026-10-30.html",)
+
+
+def run(cwd, script, *args, stdin="", env=None):
+    """ツールを動かして結果を返す。画面入力は与えた文字列だけ。
+
+    env には足したい環境変数だけを渡す（投稿フォームの本文など）。
+    いまの環境変数を引き継いだうえで上書きする。
+    """
+    merged = None
+    if env:
+        merged = dict(os.environ)
+        merged.update(env)
     return subprocess.run(
         [sys.executable, os.path.join("tools", script)] + list(args),
         cwd=cwd, input=stdin, capture_output=True, text=True,
-        encoding="utf-8", errors="replace")
+        encoding="utf-8", errors="replace", env=merged)
 
 
 def git(cwd, *args):
@@ -83,15 +120,94 @@ def manifest_state(root):
     return (info.st_size, info.st_mtime_ns, digest)
 
 
+def posts_by_date(blog):
+    """記事を、日記の日付ごとにまとめて返す。
+
+    値は (パス, フロントマター) の一覧。日付が読めないものは "" に入る。
+    """
+    out = {}
+    posts = os.path.join(blog, "content", "posts")
+    for folder, dirs, names in os.walk(posts):
+        dirs.sort()
+        for name in sorted(names):
+            if not name.endswith(".html"):
+                continue
+            path = os.path.join(folder, name)
+            with open(path, encoding="utf-8") as f:
+                meta = common.parse_front_matter(f.read())[0]
+            day = str(meta.get("diary_date") or meta.get("date") or "")[:10]
+            out.setdefault(day, []).append((path, meta))
+    return out
+
+
+def strip_pending_inbox(blog):
+    """inbox から、まだ記事になっていない TXT を取り除く。
+
+    inbox の TXT は「これから記事にするもの」なので、ひな型に持ち込むと、
+    試験が置いた TXT と一緒に取り込まれてしまう。
+    「これは取り込まないこと」を見る試験が、それで壊れる。
+    README.md などの案内は残す。取り除いた数を返す。
+    """
+    removed = 0
+    for folder, dirs, names in os.walk(os.path.join(blog, "inbox")):
+        dirs.sort()
+        for name in sorted(names):
+            if name.lower().endswith(".txt"):
+                os.remove(os.path.join(folder, name))
+                removed += 1
+    return removed
+
+
+def free_reserved_dates(blog, dates=RESERVED_TEST_DATES):
+    """試験が「まだ無い」前提で使う日付の記事を取り除く。
+
+    移行してきた記事（legacy_url を持つもの）は取り除かない。
+    旧URLの転送先になっているので、消すと verify.py が通らなくなる。
+    そういう日付を予約してしまったときは、ここで止めて知らせる。
+    取り除いたファイルの、posts からの相対パスの一覧を返す。
+    """
+    posts = os.path.join(blog, "content", "posts")
+    wanted = set(dates)
+    removed = []
+    for day, items in sorted(posts_by_date(blog).items()):
+        if day not in wanted:
+            continue
+        for path, meta in items:
+            rel = os.path.relpath(path, posts).replace(os.sep, "/")
+            if meta.get("legacy_url"):
+                raise RuntimeError(
+                    "試験が使う日付 %s に、移行してきた記事があります（%s）。\n"
+                    "この記事は旧URLの転送先なので、外すと verify.py が"
+                    "通りません。\n"
+                    "selftest.py の RESERVED_TEST_DATES からこの日付を外し、\n"
+                    "試験のほうで別の日付を使ってください。" % (day, rel))
+            os.remove(path)
+            removed.append(rel)
+    return removed
+
+
 def setUpModule():
     """ひな型を1回だけ作る（毎回ビルドすると遅いため）。"""
     global TEMPLATE
     TEMPLATE = tempfile.mkdtemp(prefix="blog-selftest-base-")
     blog = os.path.join(TEMPLATE, "blog")
     os.makedirs(blog)
-    for name in ("content", "templates", "tools"):
-        shutil.copytree(os.path.join(ROOT, name), os.path.join(blog, name), ignore=IGNORE)
+    for name in ("content", "templates", "tools", "inbox"):
+        src = os.path.join(ROOT, name)
+        if os.path.isdir(src):
+            shutil.copytree(src, os.path.join(blog, name), ignore=IGNORE)
+    os.makedirs(os.path.join(blog, "inbox"), exist_ok=True)
     shutil.copy2(os.path.join(ROOT, "config.json"), blog)
+    # 実物の中身に左右されないように、組み立てる前に下ごしらえする
+    # （上の「試験が使う日付」の覚え書きを見てください）。
+    strip_pending_inbox(blog)
+    free_reserved_dates(blog)
+    for name in REQUIRED_TEMPLATE_POSTS:
+        if not os.path.exists(os.path.join(blog, "content", "posts", name)):
+            raise RuntimeError(
+                "試験が名指しで読む記事がありません: content/posts/%s\n"
+                "この記事を消したのなら、それを読んでいる試験も直して"
+                "ください。" % name)
     docs = os.path.join(blog, "docs")
     os.makedirs(docs)
     for prefix in ("images", "assets"):
@@ -139,6 +255,21 @@ class Sandbox:
         with open(path, "wb") as f:
             f.write(data)
         return path
+
+    def put_inbox(self, name, text, category=None):
+        """inbox に TXT を置く（スマホ・クラウドからの投稿のつもり）。"""
+        folder = os.path.join(self.blog, "inbox")
+        if category:
+            folder = os.path.join(folder, category)
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, name)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        return path
+
+    def inbox_has(self, name, category=None):
+        parts = ["inbox"] + ([category] if category else []) + [name]
+        return os.path.exists(os.path.join(self.blog, *parts))
 
     def blog_path(self, *parts):
         return os.path.join(self.blog, *parts)
@@ -771,6 +902,819 @@ class PublishGuards(Base):
         result = run(box.blog, "publish.py", "--検査を省く", stdin="\n")
         self.assertIn("docs/10月3日/index.html", result.stdout)
         self.assertNotIn("\\346", result.stdout)
+
+
+# ----------------------------------------------- クラウドからの投稿（V02）
+
+CLOUD_POST = (
+    "# クラウドからの投稿\n"
+    "タグ: 仕組み\n"
+    "\n"
+    "スマホから送ったつもりの文章です。\n"
+    "空行で段落が分かれることも確かめます。\n"
+    "\n"
+    "二段落目。**太字**も使えます。\n"
+)
+
+
+def issue_form(body="スマホの投稿フォームから送ったつもりの文章です。\n"
+                    "二行目も書いておきます。",
+               day="", title="", category="", tags="", confirm=True):
+    """GitHub の投稿フォームが作る本文と同じ形を組み立てる。
+
+    空欄のときに GitHub が入れる「_No response_」も、そのまま再現する。
+    """
+    def value(v):
+        return v if v else "_No response_"
+    mark = "- [X]" if confirm else "- [ ]"
+    return "\n".join([
+        "### 本文", "", body, "",
+        "### 日付", "", value(day), "",
+        "### タイトル", "", value(title), "",
+        "### カテゴリー", "", value(category), "",
+        "### タグ", "", value(tags), "",
+        "### 公開の確認", "",
+        "%s この内容を公開してよい（送った時点で第三者に読まれ、取り消せないことを分かっています）"
+        % mark,
+        "",
+    ])
+
+
+class CloudPosting(Base):
+    """スマホ・クラウドからの投稿が、正しく記事になること。"""
+
+    # ---- inbox に置いた TXT ----
+
+    def test_80_inbox_txt_becomes_an_article(self):
+        """inbox の TXT が、既定のカテゴリーの記事になること。"""
+        box = self.sandbox()
+        box.put_inbox("2026-11-03.txt", CLOUD_POST)
+        result = run(box.blog, "import_inbox.py")
+        self.assertOK(result)
+        self.assertIn("/posts/2026-11-03/", result.stdout)
+        meta, body = common.parse_front_matter(
+            box.read("content", "posts", "2026-11-03.html"))
+        entry = meta
+        self.assertEqual(entry["title"], "クラウドからの投稿")
+        self.assertEqual(entry["date"], "2026-11-03 21:00:00")
+        self.assertEqual(entry["slug"], "2026-11-03")
+        self.assertEqual(entry["diary_date"], "2026-11-03")
+        self.assertEqual(entry["categories"], ["日記"])
+        self.assertEqual(entry["tags"], ["仕組み"])
+        self.assertEqual(entry["source"], "inbox")
+        self.assertEqual(entry["source_file"], "2026-11-03.txt")
+        self.assertIn("<strong>太字</strong>", body)
+        self.assertFalse(box.inbox_has("2026-11-03.txt"),
+                         "取り込んだあとも inbox に TXT が残っています")
+
+    def test_81_inbox_category_folder_decides_the_category(self):
+        """inbox のフォルダ名が、そのままカテゴリーになること。"""
+        box = self.sandbox()
+        box.put_inbox("2026-11-03.txt", CLOUD_POST, category="感想")
+        result = run(box.blog, "import_inbox.py")
+        self.assertOK(result)
+        self.assertIn("/posts/review/2026-11-03/", result.stdout)
+        entry = common.parse_front_matter(
+            box.read("content", "posts", "review", "2026-11-03.html"))[0]
+        self.assertEqual(entry["categories"], ["感想"])
+        self.assertEqual(entry["slug"], "review/2026-11-03")
+
+    def test_82_inbox_can_keep_the_txt(self):
+        """--残す を付けると、取り込んだ TXT が inbox に残ること。"""
+        box = self.sandbox()
+        box.put_inbox("2026-11-03.txt", CLOUD_POST)
+        self.assertOK(run(box.blog, "import_inbox.py", "--残す"))
+        self.assertTrue(box.inbox_has("2026-11-03.txt"))
+
+    def test_83_inbox_dry_run_writes_nothing(self):
+        """--dry-run では、記事も作らず TXT も消さないこと。"""
+        box = self.sandbox()
+        before = box.posts()
+        box.put_inbox("2026-11-03.txt", CLOUD_POST)
+        result = run(box.blog, "import_inbox.py", "--dry-run")
+        self.assertOK(result)
+        self.assertIn("確認のみ", result.stdout)
+        self.assertEqual(before, box.posts())
+        self.assertTrue(box.inbox_has("2026-11-03.txt"))
+
+    def test_84_inbox_refuses_an_unknown_category(self):
+        """登録されていないカテゴリーのフォルダは取り込まないこと。"""
+        box = self.sandbox()
+        before = box.posts()
+        box.put_inbox("2026-11-03.txt", CLOUD_POST, category="知らないぶんるい")
+        result = run(box.blog, "import_inbox.py")
+        self.assertNG(result, "登録されていないカテゴリー")
+        self.assertEqual(before, box.posts())
+        self.assertTrue(box.inbox_has("2026-11-03.txt", "知らないぶんるい"),
+                        "取り込まなかったのに TXT が消えました")
+
+    def test_85_inbox_refuses_a_name_without_a_date(self):
+        """ファイル名に日付が無いものは取り込まないこと。"""
+        box = self.sandbox()
+        before = box.posts()
+        box.put_inbox("きょうのにっき.txt", CLOUD_POST)
+        result = run(box.blog, "import_inbox.py")
+        self.assertNG(result, "日付")
+        self.assertEqual(before, box.posts())
+
+    def test_86_inbox_refuses_a_duplicate_body(self):
+        """すでにある記事と本文が同じなら取り込まないこと。"""
+        box = self.sandbox()
+        box.put_inbox("2026-11-03.txt", CLOUD_POST)
+        self.assertOK(run(box.blog, "import_inbox.py"))
+        after_first = box.posts()
+        box.put_inbox("2026-11-04.txt", CLOUD_POST + "\n\n")
+        result = run(box.blog, "import_inbox.py")
+        self.assertNG(result, "すでにある記事と本文が同じです")
+        self.assertEqual(after_first, box.posts(), "同じ本文の記事が増えました")
+
+    def test_87_inbox_refuses_the_same_name_twice(self):
+        """同じ名前で中身が違うものは、確かめずに増やさないこと。"""
+        box = self.sandbox()
+        box.put_inbox("2026-11-03.txt", CLOUD_POST)
+        self.assertOK(run(box.blog, "import_inbox.py"))
+        after_first = box.posts()
+        box.put_inbox("2026-11-03.txt",
+                      "# 書き直し\n\nまったく別の本文にしてみます。\n")
+        result = run(box.blog, "import_inbox.py")
+        self.assertNG(result, "同じ名前で取り込み済みです")
+        self.assertEqual(after_first, box.posts())
+
+    def test_88_inbox_refuses_a_manual_name(self):
+        """説明書・メモらしい名前は取り込まないこと。"""
+        box = self.sandbox()
+        before = box.posts()
+        box.put_inbox("2026-11-03-使い方メモ.txt", CLOUD_POST)
+        result = run(box.blog, "import_inbox.py")
+        self.assertNG(result, "説明や覚え書きの可能性")
+        self.assertEqual(before, box.posts())
+
+    def test_89_inbox_refuses_dates_outside_the_blog(self):
+        """ブログの開始前・未来の日付は取り込まないこと。"""
+        box = self.sandbox()
+        before = box.posts()
+        box.put_inbox("2020-01-01.txt", CLOUD_POST)
+        self.assertNG(run(box.blog, "import_inbox.py"), "より前の日付です")
+        box.put_inbox("2099-01-01.txt", CLOUD_POST)
+        self.assertNG(run(box.blog, "import_inbox.py"), "未来の日付です")
+        self.assertEqual(before, box.posts())
+
+    def test_90_inbox_never_overwrites_a_published_article(self):
+        """公開済みの日付と同じ日に置いても、その記事を書き換えないこと。"""
+        box = self.sandbox()
+        target = box.blog_path("content", "posts", "2026-10-30.html")
+        with open(target, "rb") as f:
+            before = hashlib.sha256(f.read()).hexdigest()
+        box.put_inbox("2026-10-30.txt",
+                      "# 同じ日にもう1本\n\n同じ日に書いた、別の日記のつもりです。\n")
+        result = run(box.blog, "import_inbox.py")
+        self.assertOK(result)
+        self.assertIn("/posts/2026-10-30-2/", result.stdout)
+        with open(target, "rb") as f:
+            self.assertEqual(before, hashlib.sha256(f.read()).hexdigest(),
+                             "公開済みの記事が書き換えられました")
+
+    def test_91_inbox_leaves_existing_articles_untouched(self):
+        """inbox から取り込んでも、既存の記事と公開物が変わらないこと。"""
+        box = self.sandbox()
+        before_posts, before_docs = box.posts(), box.docs()
+        box.put_inbox("2026-11-03.txt", CLOUD_POST)
+        self.assertOK(run(box.blog, "import_inbox.py"))
+        self.assertOK(run(box.blog, "build.py"))
+        after_posts, after_docs = box.posts(), box.docs()
+        for rel, digest in before_posts.items():
+            self.assertIn(rel, after_posts, "既存の記事が消えました: %s" % rel)
+            self.assertEqual(digest, after_posts[rel],
+                             "既存の記事が変わりました: %s" % rel)
+        for rel in before_docs:
+            self.assertIn(rel, after_docs, "公開物が消えました: %s" % rel)
+        self.assertEqual(len(after_posts), len(before_posts) + 1)
+
+    def test_92_cloud_post_passes_the_whole_check(self):
+        """inbox から取り込んだあと、組み立てと総合検査が通ること。"""
+        box = self.sandbox()
+        box.make_git()
+        box.put_inbox("2026-11-03.txt", CLOUD_POST)
+        self.assertOK(run(box.blog, "import_inbox.py"))
+        self.assertOK(run(box.blog, "build.py"))
+        checked = run(box.blog, "check.py")
+        self.assertOK(checked)
+        self.assertIn("新しい記事", checked.stdout)
+        self.assertOK(run(box.blog, "verify.py"))
+
+    def test_93_inbox_and_txt_share_the_duplicate_guard(self):
+        """inbox で入れた本文を、10_記事管理 から入れ直せないこと。"""
+        box = self.sandbox()
+        box.put_inbox("2026-11-03.txt", CLOUD_POST)
+        self.assertOK(run(box.blog, "import_inbox.py"))
+        after_first = box.posts()
+        box.put("日記", "2026年11月04日.txt", CLOUD_POST + "\n")
+        result = run(box.blog, "import_txt.py")
+        self.assertOK(result)
+        self.assertIn("すでにある記事と本文が同じです", result.stdout)
+        self.assertEqual(after_first, box.posts())
+
+    # ---- 投稿フォーム（Issue） ----
+
+    def test_94_issue_form_becomes_an_article(self):
+        """投稿フォームの本文が、指定どおりの記事になること。"""
+        box = self.sandbox()
+        body = issue_form(body="フォームから送ったつもりの文章です。\n二行目です。",
+                          day="2026-11-03", title="フォームからの投稿",
+                          category="感想", tags="仕組み, 覚え")
+        result = run(box.blog, "post_from_issue.py",
+                     env={"ISSUE_BODY": body, "ISSUE_NUMBER": "12"})
+        self.assertOK(result)
+        self.assertIn("/posts/review/2026-11-03/", result.stdout)
+        entry = common.parse_front_matter(
+            box.read("content", "posts", "review", "2026-11-03.html"))[0]
+        self.assertEqual(entry["title"], "フォームからの投稿")
+        self.assertEqual(entry["diary_date"], "2026-11-03")
+        self.assertEqual(entry["categories"], ["感想"])
+        self.assertEqual(entry["tags"], ["仕組み", "覚え"])
+        self.assertEqual(entry["source"], "issue")
+        self.assertEqual(entry["source_ref"], "issue-12")
+        self.assertIn("2026-11-03", entry["source_file"])
+
+    def test_95_issue_form_fills_in_what_is_left_blank(self):
+        """日付・題・カテゴリーを空にしても、きちんと決まること。"""
+        box = self.sandbox()
+        result = run(box.blog, "post_from_issue.py",
+                     env={"ISSUE_BODY": issue_form(), "ISSUE_NUMBER": "13"})
+        self.assertOK(result)
+        posts = [p for p in box.posts() if p not in Sandbox.__dict__]
+        new = sorted(set(box.posts()) - set(tree_digest(
+            os.path.join(TEMPLATE, "blog", "content", "posts"), only_ext=".html")))
+        self.assertEqual(len(new), 1, "新しい記事が1件ではありません: %r" % new)
+        entry = common.parse_front_matter(
+            box.read("content", "posts", new[0]))[0]
+        self.assertEqual(entry["categories"], ["日記"])
+        self.assertEqual(entry["diary_date"], entry["slug"].split("/")[-1][:10])
+        self.assertTrue(entry["title"].endswith("日"),
+                        "題が日付の形になっていません: %r" % entry["title"])
+
+    def test_96_issue_form_needs_the_confirmation(self):
+        """「公開の確認」に印が無いものは取り込まないこと。"""
+        box = self.sandbox()
+        before = box.posts()
+        result = run(box.blog, "post_from_issue.py",
+                     env={"ISSUE_BODY": issue_form(confirm=False),
+                          "ISSUE_NUMBER": "14"})
+        self.assertNG(result, "公開の確認")
+        self.assertEqual(before, box.posts())
+
+    def test_97_issue_form_refuses_a_free_form_issue(self):
+        """フォームを使わずに書かれた Issue は取り込まないこと。"""
+        box = self.sandbox()
+        before = box.posts()
+        result = run(box.blog, "post_from_issue.py",
+                     env={"ISSUE_BODY": "ちょっと相談があります。",
+                          "ISSUE_NUMBER": "15"})
+        self.assertNG(result, "投稿フォームの形")
+        self.assertEqual(before, box.posts())
+
+    def test_98_issue_form_keeps_dangerous_text_as_text(self):
+        """命令や HTML の形をした文字が、そのまま効いてしまわないこと。"""
+        box = self.sandbox()
+        danger = ("$(echo abc) `echo def` <script>alert(1)</script> "
+                  "& < > ${IFS} | ; 改行のあとも続きます。")
+        result = run(box.blog, "post_from_issue.py",
+                     env={"ISSUE_BODY": issue_form(body=danger, day="2026-11-03"),
+                          "ISSUE_NUMBER": "16"})
+        self.assertOK(result)
+        body = common.parse_front_matter(
+            box.read("content", "posts", "2026-11-03.html"))[1]
+        self.assertNotIn("<script>", body)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", body)
+        self.assertIn("$(echo abc)", body)
+        self.assertIn("&amp;", body)
+
+    def test_99_issue_form_is_not_imported_twice(self):
+        """同じ Issue からは、本文を直しても二度取り込まないこと。"""
+        box = self.sandbox()
+        self.assertOK(run(box.blog, "post_from_issue.py",
+                          env={"ISSUE_BODY": issue_form(day="2026-11-03"),
+                               "ISSUE_NUMBER": "17"}))
+        after_first = box.posts()
+        result = run(box.blog, "post_from_issue.py",
+                     env={"ISSUE_BODY": issue_form(body="書き直した本文です。",
+                                                   day="2026-11-04"),
+                          "ISSUE_NUMBER": "17"})
+        self.assertNG(result, "取り込み済み")
+        self.assertEqual(after_first, box.posts())
+
+    def test_100_issue_form_refuses_an_unknown_category(self):
+        """登録されていないカテゴリーは、勝手に作らないこと。"""
+        box = self.sandbox()
+        before = box.posts()
+        result = run(box.blog, "post_from_issue.py",
+                     env={"ISSUE_BODY": issue_form(category="知らないぶんるい"),
+                          "ISSUE_NUMBER": "18"})
+        self.assertNG(result, "登録されていないカテゴリー")
+        self.assertEqual(before, box.posts())
+        config = json.loads(box.read("config.json"))
+        self.assertNotIn("知らないぶんるい", config["categories"],
+                         "カテゴリーが勝手に登録されました")
+
+    def test_101_issue_form_refuses_a_broken_date(self):
+        """読めない日付・ありえない日付は取り込まないこと。"""
+        box = self.sandbox()
+        before = box.posts()
+        self.assertNG(run(box.blog, "post_from_issue.py",
+                          env={"ISSUE_BODY": issue_form(day="きのう"),
+                               "ISSUE_NUMBER": "19"}), "日付")
+        self.assertNG(run(box.blog, "post_from_issue.py",
+                          env={"ISSUE_BODY": issue_form(day="2026-13-40"),
+                               "ISSUE_NUMBER": "20"}), "日付")
+        self.assertEqual(before, box.posts())
+
+    def test_102_issue_form_keeps_unknown_headings_in_the_body(self):
+        """本文の中の「### なにか」が、欄の区切りと取り違えられないこと。"""
+        box = self.sandbox()
+        body = "はじめの行です。\n\n### これは見出しのつもり\n\nそのあとの行です。"
+        result = run(box.blog, "post_from_issue.py",
+                     env={"ISSUE_BODY": issue_form(body=body, day="2026-11-03"),
+                          "ISSUE_NUMBER": "21"})
+        self.assertOK(result)
+        body = common.parse_front_matter(
+            box.read("content", "posts", "2026-11-03.html"))[1]
+        self.assertIn("これは見出しのつもり", body)
+        self.assertIn("そのあとの行です", body)
+
+    def test_103_issue_form_passes_the_whole_check(self):
+        """投稿フォームから入れたあと、組み立てと総合検査が通ること。"""
+        box = self.sandbox()
+        box.make_git()
+        self.assertOK(run(box.blog, "post_from_issue.py",
+                          env={"ISSUE_BODY": issue_form(day="2026-11-03"),
+                               "ISSUE_NUMBER": "22"}))
+        self.assertOK(run(box.blog, "build.py"))
+        self.assertOK(run(box.blog, "check.py"))
+        self.assertOK(run(box.blog, "verify.py"))
+
+    def test_104_issue_form_does_not_touch_a_published_article(self):
+        """公開済みの日付を指定しても、その記事を書き換えないこと。"""
+        box = self.sandbox()
+        target = box.blog_path("content", "posts", "2026-10-30.html")
+        with open(target, "rb") as f:
+            before = hashlib.sha256(f.read()).hexdigest()
+        self.assertOK(run(box.blog, "post_from_issue.py",
+                          env={"ISSUE_BODY": issue_form(day="2026-10-30"),
+                               "ISSUE_NUMBER": "23"}))
+        with open(target, "rb") as f:
+            self.assertEqual(before, hashlib.sha256(f.read()).hexdigest(),
+                             "公開済みの記事が書き換えられました")
+
+    def test_105_a_category_with_shell_characters_stays_text(self):
+        """シェルで意味を持つ文字を含むカテゴリーでも、文字のまま扱うこと。
+
+        カテゴリー名はフォルダ名になり、そのまま記事の URL にもなる。
+        rules.safe_url_name が止めるのは改行と \\ / : * ? " < > | だけなので、
+        $ ( ) ` ; & ' を含む名前は登録できてしまう。
+        登録できてしまう以上、そのあとの書き出し・組み立て・検査で
+        「ただの文字」として扱われ、コマンドとして動かないことを確かめる。
+
+        ワークフロー側で slug を env: 経由にしているのは、このため。
+        その決まりは test_119 と test_120 が見張っている。
+        """
+        box = self.sandbox()
+        box.make_git()
+        # 前後を普通の文字にしてあるのは、名前の端の扱い（末尾の「.」や
+        # 空白など）が OS で違うのを、この試験に持ち込まないため。
+        name = "試し$(echo A)`echo B`;&\'終"
+        config = json.loads(box.read("config.json"))
+        config["categories"].append(name)
+        box.write(json.dumps(config, ensure_ascii=False, indent=1),
+                  "config.json")
+        box.put(name, "2026-11-03.txt", "特殊文字のカテゴリーの試しです。\n")
+
+        self.assertOK(run(box.blog, "import_txt.py"))
+
+        slug = "%s/2026-11-03" % name
+        self.assertTrue(
+            os.path.exists(box.blog_path("content", "posts", slug + ".html")),
+            "記事が /posts/%s/ に書き出されていません" % slug)
+        meta = common.parse_front_matter(
+            box.read("content", "posts", slug + ".html"))[0]
+        self.assertEqual(slug, meta["slug"],
+                         "slug が文字のまま保たれていません")
+        self.assertEqual([name], meta["categories"],
+                         "カテゴリー名が文字のまま保たれていません")
+
+        # 名前が「実行された跡」になっていないこと。$(echo A) が動いていれば
+        # A になり、`echo B` が動いていれば B になる。
+        self.assertIn("$(echo A)", meta["slug"])
+        self.assertIn("`echo B`", meta["slug"])
+
+        self.assertOK(run(box.blog, "build.py"))
+        self.assertOK(run(box.blog, "check.py"))
+        self.assertOK(run(box.blog, "verify.py"))
+
+    def test_106_the_rehearsal_works_after_a_real_post_today(self):
+        """きょうの日記を inbox から入れたあとでも、予行演習が通ること。
+
+        予行演習は「きょうの日付」で TXT を置く。名前をそのまま
+        <きょう>.txt にすると、本人がきょう inbox から入れた記事と
+        同じ名前になり、二重投稿の防止で止まってしまう。
+        実機で1回通したとき、これで予行演習が落ちた。
+
+        きょうの日付は予約できない（本人がその日の日記を書くのだから）。
+        だから、ここだけは「ぶつかっても通ること」を確かめる。
+        """
+        box = self.sandbox()
+        today = ingest.local_today(common.load_config()).isoformat()
+        box.put_inbox("%s.txt" % today,
+                      "# きょうの日記\n\n本人がきょう入れた日記のつもりです。\n")
+        self.assertOK(run(box.blog, "import_inbox.py"))
+        self.assertOK(run(box.blog, "build.py"))
+        self.assertOK(run(box.blog, "rehearse_post.py"))
+
+
+# ------------------------------------- 投稿の仕組みそのものの決まり（V02）
+
+def read_root(*parts):
+    with open(os.path.join(ROOT, *parts), encoding="utf-8") as f:
+        return f.read()
+
+
+POSTING_WORKFLOWS = ("post-from-issue.yml", "post-from-inbox.yml")
+WORKFLOW_DIR = os.path.join(ROOT, ".github", "workflows")
+
+
+def run_lines(text):
+    """run: のブロックに入っている行を (行番号, 行) で返す。
+
+    行頭の字下げで、ブロックの終わりを見分ける。
+    コメントの行（# で始まる行）は返さない。
+    """
+    lines = text.split("\n")
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if re.match(r"^(?:-\s+)?run:\s+(?![|>])(.+)$", stripped):
+            out.append((i + 1, line))
+            i += 1
+            continue
+        if re.match(r"^(?:-\s+)?run:\s*(?:\|-?|>-?)?\s*$", stripped):
+            indent = len(line) - len(line.lstrip())
+            i += 1
+            while i < len(lines):
+                nxt = lines[i]
+                if nxt.strip() and (len(nxt) - len(nxt.lstrip())) <= indent:
+                    break
+                if not nxt.lstrip().startswith("#"):
+                    out.append((i + 1, nxt))
+                i += 1
+            continue
+        i += 1
+    return out
+
+
+class CloudSafety(unittest.TestCase):
+    """投稿のワークフローとフォームが、危ない形になっていないこと。
+
+    ここは文字として読むだけの点検。GitHub Actions の実行環境に
+    PyYAML が無くても動くよう、正規表現で見ている。
+    """
+
+    def workflow(self, name):
+        return read_root(".github", "workflows", name)
+
+    def test_110_posting_workflows_never_push_to_main(self):
+        """投稿のワークフローが main へ push しないこと。"""
+        for name in POSTING_WORKFLOWS:
+            text = self.workflow(name)
+            with self.subTest(name=name):
+                self.assertNotRegex(
+                    text, r"git push[^\n]*\bmain\b",
+                    "%s が main へ push しようとしています" % name)
+                self.assertNotRegex(
+                    text, r"gh pr merge",
+                    "%s がプルリクエストを自動で取り込もうとしています" % name)
+                self.assertIn("DEFAULT_BRANCH", text,
+                              "%s に既定ブランチの確認がありません" % name)
+
+    def test_111_issue_body_is_never_run_as_a_command(self):
+        """Issue の本文を run: に直接書いていないこと（コマンド差し込みの防止）。"""
+        for name in POSTING_WORKFLOWS + ("post-rehearsal.yml", "check.yml"):
+            text = self.workflow(name)
+            in_run = False
+            for line in text.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("run:") or stripped in ("run: |", "run: >"):
+                    in_run = True
+                    continue
+                if stripped.startswith("- name:") or stripped.startswith("- uses:"):
+                    in_run = False
+                if in_run and "${{" in line:
+                    self.assertNotIn(
+                        "github.event.issue.body", line,
+                        "%s: 投稿の本文を run: の中に書いています: %s" % (name, stripped))
+                    self.assertNotIn(
+                        "github.event.issue.title", line,
+                        "%s: 投稿の題を run: の中に書いています: %s" % (name, stripped))
+            # 実行の名前（run-name）に本文を入れると、ログインしていない
+            # 第三者にも読める一覧に出てしまう。使っていないことを確かめる。
+            self.assertNotRegex(text, r"(?m)^run-name:",
+                                "%s が run-name を使っています" % name)
+            # 画面の記録（ステップサマリー）にも本文を書かない。
+            self.assertNotIn("GITHUB_STEP_SUMMARY\" <<", text)
+
+    def test_112_posting_workflows_only_run_for_the_owner(self):
+        """ほかの人の投稿では動かないこと。"""
+        issue = self.workflow("post-from-issue.yml")
+        self.assertIn("github.event.issue.user.login == github.repository_owner",
+                      issue, "投稿フォームが、持ち主以外にも開いています")
+        inbox = self.workflow("post-from-inbox.yml")
+        self.assertIn("github.actor == github.repository_owner",
+                      inbox, "inbox が、持ち主以外にも開いています")
+
+    def test_113_posting_workflows_ask_for_least_permissions(self):
+        """既定の権限が読み取りだけで、必要な分だけを job に足していること。"""
+        for name in POSTING_WORKFLOWS + ("post-rehearsal.yml",):
+            text = self.workflow(name)
+            with self.subTest(name=name):
+                self.assertRegex(text, r"(?m)^permissions:\n  contents: read\n",
+                                 "%s の既定の権限が読み取りだけではありません" % name)
+        rehearsal = self.workflow("post-rehearsal.yml")
+        self.assertNotIn("contents: write", rehearsal,
+                         "予行演習に書き込みの権限が付いています")
+
+    def test_114_posting_workflows_do_not_update_the_baseline(self):
+        """公開済みの記録を、自動で作り直してしまわないこと。
+
+        案内の文（echo）の中に書いてあるのはよい。実際に実行する行、
+        つまり行の先頭が python で始まるものだけを見る。
+        """
+        for name in POSTING_WORKFLOWS + ("post-rehearsal.yml", "check.yml"):
+            text = self.workflow(name)
+            with self.subTest(name=name):
+                self.assertNotRegex(
+                    text, r"(?m)^\s*python[^\n]*baseline\.py[^\n]*--update",
+                    "%s が baseline を自動で作り直そうとしています" % name)
+
+    def test_115_issue_form_categories_are_registered(self):
+        """投稿フォームの選択肢が、すべて登録済みのカテゴリーであること。"""
+        text = read_root(".github", "ISSUE_TEMPLATE", "post.yml")
+        block = re.search(r"(?m)^      options:\n((?:^        - [^\n]+\n)+)", text)
+        self.assertIsNotNone(block, "カテゴリーの選択肢が見つかりません")
+        options = [line.strip()[2:].strip()
+                   for line in block.group(1).split("\n") if line.strip()]
+        allowed = rules.allowed_categories(common.load_config())
+        for name in options:
+            self.assertIn(name, allowed,
+                          "投稿フォームの「%s」は config.json に登録されていません" % name)
+
+    def test_116_issue_form_labels_match_the_reader(self):
+        """フォームの見出しと、読み取り側の目印がそろっていること。"""
+        text = read_root(".github", "ISSUE_TEMPLATE", "post.yml")
+        labels = set(re.findall(r"(?m)^      label: (.+)$", text))
+        labels |= set(re.findall(r"(?m)^      label: (.+)$", text))
+        reader = read_root("tools", "post_from_issue.py")
+        fields = set(re.findall(r'(?m)^FIELD_\w+ = "(.+)"$', reader))
+        for field in fields:
+            self.assertIn(field, labels,
+                          "読み取り側の「%s」が、フォームの見出しにありません" % field)
+
+    def test_117_the_issue_form_warns_about_the_public_repository(self):
+        """公開リポジトリであることの注意が、フォームに書いてあること。"""
+        text = read_root(".github", "ISSUE_TEMPLATE", "post.yml")
+        self.assertIn("公開リポジトリ", text)
+        self.assertIn("required: true", text,
+                      "公開の確認が必須になっていません")
+
+    def test_118_inbox_is_explained(self):
+        """inbox に、置き方と公開の注意が書いてあること。"""
+        text = read_root("inbox", "README.md")
+        self.assertIn("公開リポジトリ", text)
+        self.assertIn("inbox/2026-11-02.txt", text)
+
+    def test_119_no_workflow_expression_inside_run(self):
+        """run: の中に ${{ }} を書いていないこと。
+
+        ${{ }} は、シェルが動く前に「文字」として差し替えられる。
+        中身に $( ) やバッククォートが入っていれば、それがそのまま
+        コマンドとして動いてしまう。
+        だから run: の中では一度も使わず、env: で環境変数に受けてから
+        使う、という決まりにしている。例外を作らないほうが、ここで
+        機械的に見張れる。
+        """
+        names = sorted(n for n in os.listdir(WORKFLOW_DIR)
+                       if n.endswith((".yml", ".yaml")))
+        self.assertTrue(names, "ワークフローが見つかりません")
+        for name in names:
+            for num, line in run_lines(self.workflow(name)):
+                with self.subTest(name=name, line=num):
+                    self.assertNotIn(
+                        "${{", line,
+                        "%s の %d 行目: run: の中に ${{ }} があります。"
+                        "env: で環境変数に受けてから使ってください → %s"
+                        % (name, num, line.strip()))
+
+    def test_120_step_results_are_passed_through_env(self):
+        """前の段の結果は、env: で環境変数に受けていること。
+
+        test_119 は「run: の中に無いこと」を見るだけなので、
+        受け渡しそのものが消えていないかを、ここで見る。
+        """
+        issue = self.workflow("post-from-issue.yml")
+        for want in ("POST_BRANCH: ${{ steps.push.outputs.branch }}",
+                     "POST_SLUG: ${{ steps.push.outputs.slug }}",
+                     "PR_URL: ${{ steps.pr.outputs.url }}"):
+            self.assertIn(want, issue,
+                          "post-from-issue.yml に「%s」がありません" % want)
+            self.assertIn(want.split(":")[0].strip(), issue)
+        inbox = self.workflow("post-from-inbox.yml")
+        self.assertIn("POST_SLUGS: ${{ steps.push.outputs.slugs }}", inbox,
+                      "post-from-inbox.yml に POST_SLUGS がありません")
+
+    def test_121_a_dangerous_slug_does_not_run_as_a_command(self):
+        """いまの渡し方では、危ない slug がコマンドとして動かないこと。
+
+        いまの渡し方（env: で環境変数にする）と、むかしの渡し方
+        （run: の中に ${{ }} で文字として埋め込む）を、実際のシェルで
+        動かして比べる。前者では動かず、後者では動いてしまうことを示す。
+        後者まで確かめるのは、この試験に効き目があることの裏取り。
+        （動かないことだけを見ていると、試験の書き方を間違えていても
+        気づけない。）
+        """
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("bash が見つかりません（Windows なら Git 付属の bash）")
+        box = tempfile.mkdtemp(prefix="blog-shell-")
+        try:
+            slug = "$(touch pwned-by-slug)/2026-11-03"
+            mark = os.path.join(box, "pwned-by-slug")
+
+            # いまの渡し方: 環境変数で渡す
+            subprocess.run(
+                [bash, "-c", 'printf "%s\\n" "記事: ${POST_SLUG}" >/dev/null'],
+                cwd=box, env=dict(os.environ, POST_SLUG=slug),
+                capture_output=True)
+            self.assertFalse(
+                os.path.exists(mark),
+                "環境変数で渡したのに、slug の中身がコマンドとして動きました")
+
+            # むかしの渡し方: 文字として差し替える（${{ }} と同じこと）
+            subprocess.run(
+                [bash, "-c",
+                 'printf "%%s\\n" "記事: %s" >/dev/null' % slug],
+                cwd=box, capture_output=True)
+            self.assertTrue(
+                os.path.exists(mark),
+                "この試験に効き目がありません（差し込みが起きていません）")
+        finally:
+            shutil.rmtree(box, ignore_errors=True)
+
+
+# ------------------------------- この試験そのものの土台の決まり（V02）
+
+class Harness(Base):
+    """この試験が、実物のリポジトリの中身に左右されないこと。
+
+    2026-11-03 の日記を inbox に置いた日、ひな型に「取り込み待ちの TXT」と
+    「その日の記事」が入り込み、10 件の試験が落ちた。
+    記事は正しく作れていたのに、検査が落ちたせいで公開が止まった。
+    同じことが二度起きないように、ひな型の下ごしらえを見張る。
+    """
+
+    def template(self, *parts):
+        return os.path.join(TEMPLATE, "blog", *parts)
+
+    def test_130_the_template_has_no_pending_inbox_txt(self):
+        """ひな型の inbox に、取り込み待ちの TXT が残っていないこと。"""
+        inbox = self.template("inbox")
+        left = []
+        for folder, dirs, names in os.walk(inbox):
+            dirs.sort()
+            for name in sorted(names):
+                if name.lower().endswith(".txt"):
+                    left.append(os.path.relpath(os.path.join(folder, name),
+                                                inbox).replace(os.sep, "/"))
+        self.assertEqual(
+            [], left,
+            "ひな型に取り込み待ちの TXT が入っています。試験が置いた TXT と"
+            "一緒に取り込まれ、「取り込まないこと」の試験が壊れます。")
+
+    def test_131_the_template_is_prepared_as_intended(self):
+        """ひな型の日付の下ごしらえが、思ったとおりになっていること。"""
+        found = posts_by_date(self.template())
+        for day in RESERVED_TEST_DATES:
+            self.assertNotIn(
+                day, found,
+                "%s の記事がひな型に残っています"
+                "（RESERVED_TEST_DATES なので外すはずです）" % day)
+        for name in REQUIRED_TEMPLATE_POSTS:
+            self.assertTrue(
+                os.path.exists(self.template("content", "posts", name)),
+                "試験が名指しで読む記事がありません: content/posts/%s" % name)
+
+    def test_132_every_fixture_date_is_accounted_for(self):
+        """試験が使う日付が、すべてどちらかの一覧に入っていること。
+
+        新しい日付の TXT を試験に足したとき、一覧への足し忘れを見つける。
+        ブログの範囲外の日付（2099-01-01 など）は、そもそも取り込まれず
+        記事にならないので見送る。
+        """
+        with open(os.path.join(ROOT, "tools", "selftest.py"),
+                  encoding="utf-8") as f:
+            src = f.read()
+        patterns = (
+            r'\.put\(\s*"[^"]*"\s*,\s*"([^"]+)"',
+            r'\.put_bytes\(\s*"[^"]*"\s*,\s*"([^"]+)"',
+            r'\.put_inbox\(\s*"([^"]+)"',
+            r'\bday="([^"]*)"',
+        )
+        known = set(RESERVED_TEST_DATES) | set(KNOWN_OCCUPIED_DATES)
+        seen = set()
+        for pattern in patterns:
+            for m in re.finditer(pattern, src):
+                name = m.group(1)
+                day = rules.date_from_name(name)
+                if not day or rules.date_in_range(day):
+                    continue
+                seen.add(day.isoformat())
+                self.assertIn(
+                    day.isoformat(), known,
+                    "試験が %r で %s を使っていますが、どちらの一覧にも"
+                    "入っていません。RESERVED_TEST_DATES（その日の記事は"
+                    "まだ無い前提）か KNOWN_OCCUPIED_DATES（記事があっても"
+                    "困らない）に足してください。"
+                    % (name, day.isoformat()))
+        self.assertTrue(
+            seen,
+            "日付つきの TXT が1つも見つかりませんでした"
+            "（この試験の探し方が古くなっています）")
+        for day in RESERVED_TEST_DATES:
+            self.assertIn(
+                day, seen,
+                "%s は予約されていますが、どの試験も使っていません。"
+                "要らなくなったら RESERVED_TEST_DATES から外してください。"
+                % day)
+
+    def test_133_the_preparation_removes_what_the_repo_carries(self):
+        """実物に取り込み待ちの TXT と予約日付の記事があっても、外せること。
+
+        2026-11-03 の日記を置いた日に起きたことを、ここで作って確かめる。
+        """
+        box = tempfile.mkdtemp(prefix="blog-harness-")
+        self.addCleanup(shutil.rmtree, box, True)
+
+        def put(text, *parts):
+            path = os.path.join(box, *parts)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+
+        def article(day, extra=""):
+            return ("---\ntitle: %s\ndate: %s 21:00:00\nslug: %s\n"
+                    "diary_date: %s\ncategories: [日記]\ntags: []\n%s"
+                    "---\n\n<p>本文</p>\n" % (day, day, day, day, extra))
+
+        put("置き方の案内\n", "inbox", "README.md")
+        put("きょうの日記\n", "inbox", "2026-11-03.txt")
+        put("きょうの感想\n", "inbox", "感想", "2026-11-03.txt")
+        put(article("2026-11-03"), "content", "posts", "2026-11-03.html")
+        put(article("2026-11-03"), "content", "posts", "感想",
+            "2026-11-03.html")
+        put(article("2026-10-30"), "content", "posts", "2026-10-30.html")
+
+        self.assertEqual(2, strip_pending_inbox(box),
+                         "取り込み待ちの TXT を外せていません")
+        self.assertTrue(
+            os.path.exists(os.path.join(box, "inbox", "README.md")),
+            "案内の README.md まで消してしまっています")
+
+        self.assertEqual(["2026-11-03.html", "感想/2026-11-03.html"],
+                         sorted(free_reserved_dates(box)),
+                         "予約日付の記事を外せていません")
+        self.assertTrue(
+            os.path.exists(os.path.join(box, "content", "posts",
+                                        "2026-10-30.html")),
+            "予約していない日付の記事まで消してしまっています")
+
+    def test_134_a_reserved_date_on_a_migrated_article_stops_the_run(self):
+        """移行してきた記事の日付を予約してしまったら、止めて知らせること。
+
+        旧URLの転送先を黙って消すと verify.py が通らなくなるので、
+        消さずに止める。
+        """
+        box = tempfile.mkdtemp(prefix="blog-harness-")
+        self.addCleanup(shutil.rmtree, box, True)
+        path = os.path.join(box, "content", "posts", "2026-11-03.html")
+        os.makedirs(os.path.dirname(path))
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("---\ntitle: むかしの記事\ndate: 2026-11-03 21:00:00\n"
+                    "slug: 2026-11-03\ndiary_date: 2026-11-03\n"
+                    "categories: [日記]\ntags: []\n"
+                    "legacy_url: /2026/11/03/old/\n---\n\n<p>本文</p>\n")
+        with self.assertRaises(RuntimeError) as caught:
+            free_reserved_dates(box)
+        self.assertIn("旧URLの転送先", str(caught.exception))
+        self.assertTrue(os.path.exists(path),
+                        "止めると言いながら消してしまっています")
 
 
 if __name__ == "__main__":

@@ -29,108 +29,38 @@ TXT の書き方:
 """
 import collections
 import datetime
-import hashlib
-import html
 import json
 import os
-import re
 import shutil
 import stat
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import baseline
 import common
+import ingest
 import rules
 
 common.use_utf8_stdout()
 
-ENCODINGS = ("utf-8-sig", "utf-8", "cp932")
-TAG_LINE = re.compile(r"^\s*(?:タグ|tags?)\s*[:：]\s*(.*)$", re.IGNORECASE)
-# 「2026年10月30日」「2026-10-30」だけの行は、本文ではなくタイトルとみなす
-DATE_ONLY = re.compile(r"^\s*\d{4}\s*[年./-]\s*\d{1,2}\s*[月./-]\s*\d{1,2}\s*日?\s*$")
-BOLD = re.compile(r"\*\*(.+?)\*\*")
-TAG_SEP = re.compile(r"[,，、/／]+")
 DONE_DIR_NAME = "_取り込み済み"
 
 # ファイル名から日付を読む決まりは rules.py に置いてある（検査側と揃えるため）。
 date_from_name = rules.date_from_name
 DATE_PATTERNS = rules.DATE_PATTERNS
 
-
-def read_text(path):
-    """文字コードを順に試して読む。あわせて中身のハッシュも返す。
-
-    どの文字コードでも読めなかった場合は replaced=True を返す。
-    置換文字（文字化け）のまま記事にしてしまわないよう、呼び出し側で弾く。
-    """
-    with open(path, "rb") as f:
-        raw = f.read()
-    digest = hashlib.sha256(raw).hexdigest()
-    for enc in ENCODINGS:
-        try:
-            return raw.decode(enc), enc, digest, False
-        except UnicodeDecodeError:
-            continue
-    return raw.decode("utf-8", errors="replace"), "utf-8(一部置換)", digest, True
-
-
-def split_header(text):
-    """本文より前の「# タイトル」「タグ:」を取り出して、残りを本文として返す。"""
-    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    title, tags, i = None, [], 0
-    while i < len(lines):
-        line = lines[i].strip()
-        if not line:
-            if title is None and not tags:
-                break          # 先頭の空行は本文の一部として扱う
-            i += 1
-            break              # 見出しの終わり
-        if title is None and line.startswith("#"):
-            title = line.lstrip("#").strip()
-            i += 1
-            continue
-        if title is None and DATE_ONLY.match(line):
-            # 1行目が日付だけ。WordPress 時代の日記と同じ形なのでタイトルにする
-            title = line
-            i += 1
-            continue
-        m = TAG_LINE.match(line)
-        if m:
-            tags = [t.strip() for t in TAG_SEP.split(m.group(1)) if t.strip()]
-            i += 1
-            continue
-        break                  # 見出しではない＝ここから本文
-    return title, tags, "\n".join(lines[i:])
-
-
-def to_html(text):
-    """プレーンテキストを段落と改行の HTML にする。"""
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    blocks = [b.strip("\n") for b in re.split(r"\n\s*\n", text) if b.strip()]
-    out = []
-    for block in blocks:
-        lines = [BOLD.sub(r"<strong>\1</strong>", html.escape(line.strip()))
-                 for line in block.split("\n") if line.strip()]
-        if lines:
-            out.append("<p>%s</p>" % "<br>".join(lines))
-    return "\n\n".join(out) + "\n"
-
-
-def body_key(text):
-    """本文の中身で重複を見分けるための指紋。
-
-    改行の書き方・BOM・空白のちがいは同じものとして扱う。
-    以前はバイト単位の一致しか見ていなかったため、末尾に改行を1つ足しただけで
-    同じ日記が二重に増えてしまっていた。
-
-    空白はすべて取り除く（1つにまとめるのではない）。これは、もとの TXT では
-    改行だった場所が、記事では <br> になるため。空白1つにまとめる数えかたでは、
-    同じ日記なのに TXT 側と記事側で指紋が変わってしまい、重複を見逃していた。
-    check.py の本文照合と同じ数えかたに揃えている。
-    """
-    normalized = re.sub(r"\s+", "", (text or "").replace("﻿", ""))
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+# 題とタグの読み取り、本文の HTML 化、本文の指紋、URL の重なり避けは
+# tools/ingest.py に移した。スマホからの投稿でも、まったく同じ処理を通す。
+# ここでは、これまでと同じ名前でも呼べるようにしておく（出方は変わらない）。
+TAG_LINE = ingest.TAG_LINE
+DATE_ONLY = ingest.DATE_ONLY
+BOLD = ingest.BOLD
+TAG_SEP = ingest.TAG_SEP
+split_header = ingest.split_header
+to_html = ingest.to_html
+body_key = ingest.body_key
+unique_slug = ingest.unique_slug
+read_text = ingest.read_text
+ENCODINGS = ingest.ENCODINGS
 
 
 def articles_dir(cfg):
@@ -336,13 +266,31 @@ def resolve_categories(files, cfg, pages, dry_run, allow_new):
     return kept
 
 
-def unique_slug(base, taken):
-    slug = base
-    n = 2
-    while slug in taken:
-        slug = "%s-%d" % (base, n)
-        n += 1
-    return slug
+def skip_hint(plan, today):
+    """取り込めなかった理由ごとに、TXT を直すための案内を返す。
+
+    何を直せばよいかは入口ごとに違う（TXT・inbox・投稿フォーム）。
+    判定そのものは ingest.py に1か所でまとめ、案内だけをここに置く。
+    """
+    hints = {
+        "empty-body": "1行目の次に、空行をはさんで本文を書いてください。",
+        "too-long": "日記として取り込むなら --強制取り込み を付けてください。",
+        "same-body": "入れ直すなら --force を付けてください。",
+        "same-source": "書き直したものに差し替えるなら --force を付けてください。",
+        "no-date": "例: %s.txt / %s.txt / %d年%d月%d日.txt\n"
+                   "ファイルの更新日時を使うなら --更新日時を使う を付けてください。"
+                   % (today.isoformat(), today.strftime("%Y%m%d"),
+                      today.year, today.month, today.day),
+        "date-out-of-range": "この日付で取り込むなら --強制取り込み を付けてください。",
+        "unknown-category": "config.json の categories に足すか、"
+                            "--新カテゴリー許可 を付けてください。",
+        "bad-tag": "TXT の「タグ:」の行を直してください。",
+        "bad-category-url": "フォルダの名前を変えてください。",
+        "outside": "カテゴリーのフォルダ名を見直してください。",
+        "frozen": "過去記事を直すときは、先に次を実行してください。\n"
+                  "  python tools/baseline.py --修正許可 %s" % (plan.slug or ""),
+    }
+    return hints.get(plan.code)
 
 
 def protect(path):
@@ -373,21 +321,8 @@ def main():
 
     notice_legacy_folder(cfg)
 
-    existing = common.load_posts()
-    pages = common.load_pages()
-    taken = {p["slug"] for p in existing if p.get("slug")}
-    by_hash = {p["source_sha256"]: p for p in existing if p.get("source_sha256")}
-    # 本文の中身そのもので重複を見る。既存の記事すべてを相手にする。
-    by_body = {}
-    for post in existing:
-        by_body.setdefault(body_key(common.strip_tags(post.get("_body", ""))), post)
-    # 同じファイル名を同じカテゴリーに置き直した場合も、同じ記事として扱う
-    by_source = {(tuple(p.get("categories") or [""])[0], p["source_file"]): p
-                 for p in existing if p.get("source_file")}
-
-    frozen = set((baseline.load_baseline() or {}).get("posts", {}))
-    unlocked = baseline.load_unlocked()
-    reserved_top = rules.reserved_top_level(p.get("slug") for p in pages)
+    catalog = ingest.Catalog(cfg)
+    pages = catalog.pages
 
     files = collect(args, cfg)
     if files:
@@ -437,152 +372,63 @@ def main():
             skipped += 1
             continue
 
-        seen = by_hash.get(digest)
-        if seen and not force:
+        title, tags, body_text = split_header(text)
+
+        def resolve_day(_path=path, _label=label, _name=name, _title=title):
+            """日付を決める。二重投稿の見分けが済んだあとに呼ばれる。
+
+            取り込み済みのものは、日付が読めなくても黙って見送る。
+            この順番を保つため、日付を決めるのはここまで待つ。
+            """
+            day = date_from_name(_name) or date_from_name(_title or "")
+            if day is not None:
+                return day, None
+            if not use_mtime:
+                return None, "ファイル名に日付が入っていません。"
+            day = datetime.date.fromtimestamp(os.path.getmtime(_path))
+            print("  [注意] %s から日付を読み取れないため、更新日時 %s を使います。"
+                  % (_label, day.isoformat()))
+            return day, None
+
+        plan = catalog.plan(title=title, body_text=body_text, category=category,
+                            tags=tags, source="txt", source_name=name,
+                            digest=digest, force=force, force_import=force_import,
+                            today=today, resolve_day=resolve_day)
+
+        if plan.code == "already":
             already.append(label)
             skipped += 1
             continue
-
-        title, tags, body_text = split_header(text)
-
-        # 見出しとタグ行を取り除いたあとで空かどうかを見る。
-        # 先に見ていたため「# タイトルだけ」の1行ファイルが
-        # 本文のない記事として公開されてしまっていた。
-        if not body_text.strip():
-            skip(label, "見出しやタグの行しかなく、本文がありません。",
-                 "1行目の次に、空行をはさんで本文を書いてください。")
+        if not plan.ok:
+            skip(label, plan.reason, skip_hint(plan, today))
             skipped += 1
             continue
 
-        body_id = body_key(body_text)
-        same_body = by_body.get(body_id)
-        if same_body and not force:
-            skip(label, "すでにある記事と本文が同じです（/posts/%s/）。"
-                 % same_body.get("slug", "?"),
-                 "入れ直すなら --force を付けてください。")
-            skipped += 1
-            continue
-
-        if not seen:
-            same_name = by_source.get((category, name))
-            if same_name and not force:
-                skip(label, "同じ名前で取り込み済みです（/posts/%s/ ／ 中身が違います）。"
-                     % same_name["slug"],
-                     "書き直したものに差し替えるなら --force を付けてください。")
-                skipped += 1
-                continue
-            if same_name and force:
-                seen = same_name
-
-        day = date_from_name(name) or date_from_name(title or "")
-        if day is None:
-            if not use_mtime:
-                skip(label, "ファイル名に日付が入っていません。",
-                     "例: %s.txt / %s.txt / %d年%d月%d日.txt\n"
-                     "ファイルの更新日時を使うなら --更新日時を使う を付けてください。"
-                     % (today.isoformat(), today.strftime("%Y%m%d"),
-                        today.year, today.month, today.day))
-                skipped += 1
-                continue
-            day = datetime.date.fromtimestamp(os.path.getmtime(path))
-            print("  [注意] %s から日付を読み取れないため、更新日時 %s を使います。"
-                  % (label, day.isoformat()))
-
-        out_of_range = rules.date_in_range(day, today)
-        if out_of_range and not force_import:
-            skip(label, "%s（%s）" % (out_of_range, day.isoformat()),
-                 "この日付で取り込むなら --強制取り込み を付けてください。")
-            skipped += 1
-            continue
-
-        if not title:
-            title = "%d年%d月%d日" % (day.year, day.month, day.day)
-
-        added_suffix = None
-        if seen and force:
-            slug = seen["slug"]
-            out_path = seen["_path"]
-        else:
-            base = day.isoformat()
-            if category != default_cat:
-                cat_url = common.url_name(category, cat_map)
-                ok, why = rules.safe_url_name(cat_url, reserved=reserved_top)
-                if not ok:
-                    skip(label, "カテゴリー「%s」は URL に使えません: %s" % (category, why),
-                         "フォルダの名前を変えてください。")
-                    skipped += 1
-                    continue
-                base = "%s/%s" % (cat_url, base)
-            slug = unique_slug(base, taken)
-            if slug != base:
-                added_suffix = base
-            ok, why = rules.safe_slug(slug, reserved=())
-            if not ok:
-                skip(label, "記事の URL を作れません: %s" % why)
-                skipped += 1
-                continue
-            out_path = os.path.join(common.CONTENT_POSTS, slug + ".html")
-
-        # 書き込む先が content/posts の中に収まっているか、必ず確かめる。
-        if not rules.under(common.CONTENT_POSTS, os.path.dirname(out_path)):
-            skip(label, "記事の置き場所がフォルダの外になります: %s" % out_path,
-                 "カテゴリーのフォルダ名を見直してください。")
-            skipped += 1
-            continue
-
-        # 公開済みとして記録されている記事は、どんな経路でも上書きしない。
-        # 修正したいときは、人が baseline.py --修正許可 を実行する必要がある。
-        if slug in frozen and slug not in unlocked:
-            skip(label, "/posts/%s/ は公開済みとして記録されている記事です。" % slug,
-                 "過去記事を直すときは、先に次を実行してください。\n"
-                 "  python tools/baseline.py --修正許可 %s" % slug)
-            skipped += 1
-            continue
-
-        meta = collections.OrderedDict()
-        meta["title"] = title
-        meta["date"] = datetime.datetime.combine(
-            day, datetime.time(21, 0)).strftime("%Y-%m-%d %H:%M:%S")
-        meta["slug"] = slug
-        meta["diary_date"] = day.isoformat()
-        meta["categories"] = [category]
-        meta["tags"] = tags
-        meta["source"] = "txt"
-        meta["source_file"] = name
-        meta["source_sha256"] = digest
-
-        body = to_html(body_text)
-        chars = len(common.strip_tags(body))
         print("  [%s] %s → /posts/%s/  「%s」 %d字%s"
-              % ("取り込み直し" if seen else "取り込み", label, slug, title, chars,
-                 "  タグ: " + "・".join(tags) if tags else ""))
-        if added_suffix:
+              % ("取り込み直し" if plan.is_reimport else "取り込み", label, plan.slug,
+                 plan.title, plan.chars,
+                 "  タグ: " + "・".join(plan.tags) if plan.tags else ""))
+        if plan.added_suffix:
             print("             [注意] /posts/%s/ はすでにあるため、別の記事として足します。"
-                  % added_suffix)
+                  % plan.added_suffix)
             print("                    同じ日に何本でも書ける決まりです。"
                   "既存の記事を書き直したいときは、先に")
             print("                    python tools/baseline.py --修正許可 %s"
-                  % added_suffix)
+                  % plan.added_suffix)
             print("                    を実行してから --force を付けてください。")
-        if chars < rules.SHORT_BODY_CHARS:
-            print("             [注意] 本文が %d 字しかありません。" % chars)
+        if plan.chars < rules.SHORT_BODY_CHARS:
+            print("             [注意] 本文が %d 字しかありません。" % plan.chars)
 
         # 確認のみのときも、同じ実行の中での重なりを正しく見せるため控えておく
-        taken.add(slug)
-        by_hash[digest] = {"slug": slug, "_path": out_path}
-        by_source[(category, name)] = {"slug": slug, "_path": out_path}
-        by_body[body_id] = {"slug": slug, "_path": out_path}
+        catalog.remember(plan)
 
         if dry_run:
             imported += 1
             continue
 
-        if os.path.exists(out_path):
-            backup = out_path + ".bak"
-            shutil.copy2(out_path, backup)
+        backup = catalog.write(plan)
+        if backup:
             print("             （元の記事は %s に控えました）" % os.path.basename(backup))
-
-        common.write_entry(out_path, meta, body)
 
         # 原本は動かさない。取り込んだ時点の控えだけを残す
         done_dir = os.path.join(articles_dir(cfg), DONE_DIR_NAME, category)

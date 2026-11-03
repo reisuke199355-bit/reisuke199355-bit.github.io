@@ -1,0 +1,97 @@
+# スマホから日記を投稿するためのフォーム。
+#
+# ここに入力した内容は Issue として保存され、GitHub Actions が
+# 記事ファイルを作ってプルリクエストにする（main には自動で入らない）。
+#
+# 大事なこと:
+#   このリポジトリは公開リポジトリなので、Issue の本文は公開前でも
+#   第三者が読める。だから「公開の確認」の印を必須にしている。
+#
+# 見出しの文字（label）は tools/post_from_issue.py が読み取る目印なので、
+# 変えるときは両方そろえて変えること（tools/selftest.py が見張っている）。
+name: 日記を投稿する
+description: スマホやブラウザから日記を送ります。検査に通ったものだけが公開できます。
+title: 日記の投稿
+labels:
+  - 投稿
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > **この入口は、まだ動いていません。**
+        > 安全の確かめが済むまで、受け取りの自動処理
+        > （`.github/workflows/post-from-issue.yml`）を止めてあります。
+        > ここから送っても、記事にはなりません。
+        > いまは `inbox/` に TXT を置く方法を使ってください。
+
+        **ここに書いた文章は、送った瞬間に取り消せなくなります。**
+
+        このリポジトリは誰でも見られる公開リポジトリです。
+        Issue の本文は、作られた時点で GitHub の公開イベントとして流れ、
+        外部のアーカイブにも取り込まれます。
+        あとから Issue を消しても、そこからは消せません。
+
+        - 書きかけの下書きは、ここではなく端末のメモアプリに置いてください
+        - 公開すると決めた文章だけを、ここへ貼り付けてください
+        - 迷いがあるなら、送らないでください
+
+        下書きも守りたいときは `MANUAL-cloud-posting.md` の
+        「非公開の受け取り箱」を見てください。
+
+  - type: textarea
+    id: body
+    attributes:
+      label: 本文
+      description: >-
+        空行で段落が分かれます。段落の中の改行は、そのまま改行になります。
+        1行目を「# 題」にすると題にもできます。
+      placeholder: |
+        きょうは…
+    validations:
+      required: true
+
+  - type: input
+    id: date
+    attributes:
+      label: 日付
+      description: 空にすると「今日（日本時間）」になります。例 2026-11-02
+      placeholder: 2026-11-02
+    validations:
+      required: false
+
+  - type: input
+    id: title
+    attributes:
+      label: タイトル
+      description: 空にすると「2026年11月2日」のような題になります。
+    validations:
+      required: false
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: カテゴリー
+      description: 選ばないと「日記」になります。
+      options:
+        - 日記
+        - お知らせ
+        - 感想
+    validations:
+      required: false
+
+  - type: input
+    id: tags
+    attributes:
+      label: タグ
+      description: 「,」で区切ります。省略できます。
+      placeholder: AI, 料理
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 公開の確認
+      options:
+        - label: この内容を公開してよい（送った時点で第三者に読まれ、取り消せないことを分かっています）
+          required: true
