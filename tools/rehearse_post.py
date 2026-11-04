@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -338,6 +339,10 @@ def main():
         print(str(exc))
         return 1
     finally:
+        # git が作るファイルは読み取り専用で、Windows ではそのままだと消せない
+        for folder, _dirs, names in os.walk(tmp):
+            for name in names:
+                os.chmod(os.path.join(folder, name), stat.S_IWRITE)
         shutil.rmtree(tmp, ignore_errors=True)
 
     if (before_content != tree_digest(os.path.join(ROOT, "content"))
