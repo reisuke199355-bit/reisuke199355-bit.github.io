@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -295,6 +296,10 @@ class Sandbox:
             "commit", "-qm", "init")
 
     def close(self):
+        # git が作るファイルは読み取り専用で、Windows ではそのままだと消せない
+        for folder, _dirs, names in os.walk(self.root):
+            for name in names:
+                os.chmod(os.path.join(folder, name), stat.S_IWRITE)
         shutil.rmtree(self.root, ignore_errors=True)
 
 
@@ -1119,8 +1124,59 @@ class BuildGuards(Base):
 
 # ----------------------------------------------------------- 公開の手前
 
+def rev(cwd, name="HEAD"):
+    return git(cwd, "rev-parse", name).stdout.strip()
+
+
 class PublishGuards(Base):
     """公開の前に止めること。"""
+
+    def make_github(self, box):
+        """手元の複製に、仮の GitHub（ただのフォルダ）をつなぐ。
+
+        本物の GitHub には一切さわらない。CI の git には名前の設定が
+        無いので、ここで入れておく。作業用の控えの扱いや改行の決まりが
+        実物と同じになるように、.gitignore と .gitattributes も持ってくる。
+        """
+        for name in (".gitignore", ".gitattributes"):
+            shutil.copy2(os.path.join(ROOT, name), box.blog)
+        box.make_git()
+        git(box.blog, "branch", "-M", "main")
+        git(box.blog, "config", "user.email", "t@example.invalid")
+        git(box.blog, "config", "user.name", "t")
+        origin = os.path.join(box.root, "origin.git")
+        git(box.root, "init", "-q", "--bare", origin)
+        git(box.blog, "remote", "add", "origin", origin)
+        self.assertEqual(0, git(box.blog, "push", "-q", "-u", "origin", "main").returncode)
+        return origin
+
+    def phone_post(self, box, origin, day):
+        """スマホから投稿して Merge したつもりで、仮の GitHub を進める。"""
+        phone = os.path.join(box.root, "phone")
+        self.assertEqual(0, git(box.root, "clone", "-q", "-b", "main", origin, phone).returncode)
+        git(phone, "config", "user.email", "t@example.invalid")
+        git(phone, "config", "user.name", "t")
+        path = os.path.join(phone, "content", "posts", "%s.html" % day)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("---\ntitle: スマホの記事\ndate: %s 21:00:00\nslug: %s\n"
+                    "diary_date: %s\ncategories: [日記]\n---\n\n"
+                    "<p>スマホから書いた日記です。</p>\n" % (day, day, day))
+        self.assertOK(run(phone, "build.py"))
+        git(phone, "add", "-A")
+        self.assertEqual(0, git(phone, "commit", "-qm", "スマホの記事").returncode)
+        self.assertEqual(0, git(phone, "push", "-q", "origin", "main").returncode)
+
+    def local_post(self, box, day):
+        """手元で TXT を取り込んで、ページまで作る（1_ と 2_ のつもり）。"""
+        box.put("日記", "%s.txt" % day, "手元で書いた日記です。\n\n二段落目です。\n")
+        self.assertOK(run(box.blog, "import_txt.py"))
+        self.assertOK(run(box.blog, "build.py"))
+
+    def assertArticlesOnGitHub(self, origin, *slugs):
+        for slug in slugs:
+            for name in ("content/posts/%s.html" % slug, "docs/posts/%s/index.html" % slug):
+                self.assertEqual(0, git(origin, "cat-file", "-e", "main:" + name).returncode,
+                                 "GitHub にありません: " + name)
 
     def test_70_publish_stops_on_a_changed_article(self):
         box = self.sandbox()
@@ -1155,6 +1211,126 @@ class PublishGuards(Base):
         result = run(box.blog, "publish.py", "--検査を省く", stdin="\n")
         self.assertIn("docs/10月3日/index.html", result.stdout)
         self.assertNotIn("\\346", result.stdout)
+
+    def test_73_publish_merges_a_phone_post_when_sync_was_forgotten(self):
+        """5_ を忘れて 1_ → 3_ としても、両方の記事が残って公開できる。"""
+        box = self.sandbox()
+        origin = self.make_github(box)
+        self.phone_post(box, origin, "2026-11-02")
+        self.local_post(box, "2026-11-03")
+        result = run(box.blog, "publish.py", stdin="yes\n")
+        self.assertOK(result)
+        self.assertIn("GitHub のほうが 1 件新しくなっています", result.stdout)
+        self.assertIn("公開しました", result.stdout)
+        self.assertEqual(rev(box.blog), rev(origin, "main"))
+        self.assertEqual("", git(box.blog, "status", "--porcelain").stdout)
+        self.assertArticlesOnGitHub(origin, "2026-11-02", "2026-11-03")
+        archive = box.read("docs", "archive", "index.html")
+        self.assertIn("posts/2026-11-02/", archive)
+        self.assertIn("posts/2026-11-03/", archive)
+        self.assertOK(run(box.blog, "check.py"))
+
+    def test_74_publish_sends_what_a_failed_push_left_behind(self):
+        """送信に失敗しても、もう一度実行すれば送れる。「変更なし」とは言わない。"""
+        box = self.sandbox()
+        origin = self.make_github(box)
+        self.local_post(box, "2026-11-03")
+        git(box.blog, "remote", "set-url", "--push", "origin",
+            os.path.join(box.root, "nowhere.git"))
+        failed = run(box.blog, "publish.py", stdin="yes\n")
+        self.assertNG(failed, "送信に失敗しました", "もう一度実行すれば")
+        left = rev(box.blog)
+        self.assertNotEqual(left, rev(origin, "main"))
+
+        git(box.blog, "config", "--unset", "remote.origin.pushurl")
+        declined = run(box.blog, "publish.py", stdin="\n")
+        self.assertIn("まだ送信していないコミット: 1 件", declined.stdout)
+        self.assertIn("中断しました", declined.stdout)
+        self.assertNotIn("変わったところがありません", declined.stdout)
+        self.assertNotEqual(left, rev(origin, "main"))
+
+        again = run(box.blog, "publish.py", stdin="yes\n")
+        self.assertOK(again)
+        self.assertEqual(left, rev(origin, "main"))
+        self.assertArticlesOnGitHub(origin, "2026-11-03")
+
+    def test_75_publish_stops_before_committing_when_github_is_out_of_reach(self):
+        """GitHub を見に行けないときは、コミットする前に止める。"""
+        box = self.sandbox()
+        self.make_github(box)
+        self.local_post(box, "2026-11-03")
+        before = rev(box.blog)
+        git(box.blog, "remote", "set-url", "origin", os.path.join(box.root, "nowhere.git"))
+        result = run(box.blog, "publish.py", stdin="yes\n")
+        self.assertNG(result, "GitHub の状態を確かめられませんでした")
+        self.assertEqual(before, rev(box.blog))
+        self.assertEqual("", git(box.blog, "diff", "--cached", "--name-only").stdout)
+        self.assertNotEqual("", git(box.blog, "status", "--porcelain").stdout)
+
+    def test_76_publish_keeps_both_when_the_same_article_collides(self):
+        """同じ日付の記事を両方で作ったら、何も失わずに止める。
+
+        そのあと OPERATIONS.md の「公開が止まったとき」の手順で公開できること。
+        """
+        box = self.sandbox()
+        origin = self.make_github(box)
+        self.phone_post(box, origin, "2026-11-03")
+        published = rev(origin, "main")
+        self.local_post(box, "2026-11-03")
+        result = run(box.blog, "publish.py", stdin="yes\n")
+        self.assertNG(result, "自動では合わせられません",
+                      "content/posts/2026-11-03.html", "公開が止まったとき")
+        self.assertEqual(published, rev(origin, "main"))
+        self.assertNotEqual(0, git(box.blog, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode)
+        self.assertEqual("", git(box.blog, "status", "--porcelain").stdout)
+        text = box.read("content", "posts", "2026-11-03.html")
+        self.assertIn("手元で書いた日記です。", text)
+
+        os.remove(box.blog_path("content", "posts", "2026-11-03.html"))
+        box.write(text.replace("slug: 2026-11-03", "slug: 2026-11-03-2"),
+                  "content", "posts", "2026-11-03-2.html")
+        self.assertOK(run(box.blog, "build.py"))
+        again = run(box.blog, "publish.py", stdin="yes\n")
+        self.assertOK(again)
+        self.assertEqual(rev(box.blog), rev(origin, "main"))
+        self.assertArticlesOnGitHub(origin, "2026-11-03", "2026-11-03-2")
+        self.assertOK(run(box.blog, "check.py"))
+
+    def test_77_publish_says_what_is_true_when_nothing_can_be_sent(self):
+        """送るものが無いときの案内。GitHub が新しいときは、そう伝える。"""
+        box = self.sandbox()
+        origin = self.make_github(box)
+        same = run(box.blog, "publish.py")
+        self.assertOK(same)
+        self.assertIn("変わったところがありません", same.stdout)
+
+        self.phone_post(box, origin, "2026-11-02")
+        before = rev(box.blog)
+        newer = run(box.blog, "publish.py")
+        self.assertOK(newer)
+        self.assertIn("手元から送信するものはありません", newer.stdout)
+        self.assertIn("5_クラウドの投稿を受け取る.bat", newer.stdout)
+        self.assertEqual(before, rev(box.blog))
+
+        self.assertOK(run(box.blog, "sync.py"))
+        self.assertEqual(rev(origin, "main"), rev(box.blog))
+
+    def test_78_sync_points_to_publish_when_the_branches_diverged(self):
+        """枝分かれしているとき、5_ は何も変えず、3_ を案内する。案内どおり公開できる。"""
+        box = self.sandbox()
+        origin = self.make_github(box)
+        self.phone_post(box, origin, "2026-11-02")
+        self.local_post(box, "2026-11-03")
+        git(box.blog, "add", "-A")
+        self.assertEqual(0, git(box.blog, "commit", "-qm", "手元の記事").returncode)
+        before = rev(box.blog)
+        result = run(box.blog, "sync.py")
+        self.assertNG(result, "枝分かれ", "3_GitHubへ公開.bat")
+        self.assertEqual(before, rev(box.blog))
+
+        self.assertOK(run(box.blog, "publish.py", stdin="yes\n"))
+        self.assertEqual(rev(box.blog), rev(origin, "main"))
+        self.assertArticlesOnGitHub(origin, "2026-11-02", "2026-11-03")
 
 
 # ----------------------------------------------- クラウドからの投稿（V02）

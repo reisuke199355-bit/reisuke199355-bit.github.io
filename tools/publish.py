@@ -14,6 +14,12 @@
   - config.json の site_url が設定されているか
   - 何が送られるかを表示し、本人が「はい」と打ったか
 
+GitHub のほうが新しいとき（スマホから公開したあとなど）は、
+手元の変更をコミットしてから GitHub の内容と合わせ、検査し直して送信する。
+ぶつかった docs/ は content/ から作り直す。content/ などがぶつかったら、
+どちらを残すかは人の判断なので、合わせる前の状態に戻して知らせる。
+送信に失敗して手元に残ったコミットは、もう一度実行すれば送信する。
+
 ふだんの日記の公開は、これまでと同じ手順のまま。
 検査に通れば、追加の操作は何もいらない。
 """
@@ -95,6 +101,107 @@ def run_checks():
     return False
 
 
+def attempt(*args):
+    """git を動かして、失敗しても止めずに結果をそのまま返す。"""
+    return subprocess.run(["git"] + list(args), cwd=common.ROOT,
+                          capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+
+
+def current_branch():
+    """いまのブランチ名。コミットが1つも無くても読める形で聞く。"""
+    result = attempt("symbolic-ref", "--short", "HEAD")
+    return result.stdout.strip() if result.returncode == 0 else "HEAD"
+
+
+def github_state(branch):
+    """GitHub の最新を見て (手元だけのコミット数, GitHub だけのコミット数) を返す。
+
+    見に行けなければ None を返す。GitHub にまだこのブランチが無ければ、
+    手元のコミットはすべて「手元だけ」と数える。
+    """
+    listed = attempt("ls-remote", "origin", "refs/heads/%s" % branch)
+    if listed.returncode != 0:
+        return None
+    if not listed.stdout.strip():
+        counted = attempt("rev-list", "--count", "HEAD")
+        return (int(counted.stdout) if counted.returncode == 0 else 0), 0
+    if attempt("fetch", "origin", branch).returncode != 0:
+        return None
+    counted = attempt("rev-list", "--left-right", "--count", "FETCH_HEAD...HEAD")
+    try:
+        behind, ahead = (int(n) for n in counted.stdout.split())
+    except ValueError:
+        return None
+    return ahead, behind
+
+
+def is_generated(path):
+    """build.py が作り直せる公開ファイルか（docs/ のうち、手で用意したもの以外）。"""
+    return (path.startswith("docs/")
+            and not path[len("docs/"):].startswith(rules.NON_GENERATED_DOCS_PREFIX))
+
+
+def undo_merge():
+    """合わせる前の状態に戻す。
+
+    手元の変更は合わせ始める前にすべてコミットしてあるので、
+    ここで消えるのは、合わせる途中で生まれたものだけ。
+    """
+    attempt("reset", "--hard", "HEAD")
+    attempt("clean", "-fdq", "--", "docs")
+
+
+def merge_github():
+    """GitHub の新しいコミットを手元に合わせる。合わせられたら True を返す。
+
+    どちらかに新しい記事があると docs/ の一覧ページはほぼ必ずぶつかるが、
+    content/ から作り直せるので、機械的に片づく。
+    ぶつからなかったページも古いままのことがあるので、必ず作り直す。
+    """
+    print("\nGitHub の新しい内容と合わせます...")
+    merged = attempt("merge", "--no-commit", "--no-ff", "FETCH_HEAD")
+    if attempt("rev-parse", "-q", "--verify", "MERGE_HEAD").returncode != 0:
+        undo_merge()
+        print("\n*** 中断します：GitHub の内容と合わせられませんでした ***")
+        print((merged.stderr or merged.stdout).strip()[-800:])
+        print("\n手元の変更はコミットして残してあります。まだ送信していません。")
+        return False
+
+    conflicted = git_paths("diff", "--name-only", "--diff-filter=U")
+    others = [p for p in conflicted if not is_generated(p)]
+    if others:
+        undo_merge()
+        print("\n*** 中断します：手元と GitHub で同じファイルが変わっていて、"
+              "自動では合わせられません ***")
+        for path in others:
+            print("    %s" % path)
+        print("\n同じ日付の記事を、手元とスマホの両方で作ったときなどに起こります。")
+        print("手元の変更はコミットして残してあり、GitHub の記事も消えていません。")
+        print("まだ送信していません。")
+        print("直しかたは OPERATIONS.md の「公開が止まったとき」にあります。")
+        return False
+
+    for path in conflicted:
+        if attempt("checkout", "--ours", "--", path).returncode != 0:
+            attempt("rm", "-fq", "--", path)
+    built = subprocess.run([sys.executable,
+                            os.path.join(common.ROOT, "tools", "build.py")],
+                           cwd=common.ROOT, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+    if built.returncode != 0:
+        undo_merge()
+        print("\n*** 中断します：合わせたあとのページを作れませんでした ***")
+        print((built.stdout or built.stderr or "").strip()[-800:])
+        print("\n手元の変更はコミットして残してあります。まだ送信していません。")
+        return False
+
+    git("add", "-A")
+    git("commit", "-m", "GitHub の投稿と手元の変更を合わせる")
+    print("  [OK] 合わせました。手元の記事も GitHub の記事も残っています。")
+    return True
+
+
 def main():
     args = sys.argv[1:]
     skip_checks = any(a in ("--検査を省く", "--skip-checks") for a in args)
@@ -150,19 +257,49 @@ def main():
         git("reset", check=False)
         return 1
 
-    if not staged:
-        print("\n前回の公開から変わったところがありません。送信するものはありません。")
+    # GitHub の最新を見る。手元だけのコミットと、GitHub だけのコミットが分かる。
+    # ここで見に行けないなら、送信もできないので、コミットする前に止める。
+    branch = current_branch()
+    remote = git("remote", "get-url", "origin", check=False, quiet=True)
+    ahead, behind = 0, 0
+    if remote:
+        state = github_state(branch)
+        if state is None:
+            print("\n*** 中断します：GitHub の状態を確かめられませんでした ***")
+            print("ネットワークと GitHub の認証を確認して、もう一度実行してください。")
+            print("まだコミットも送信もしていません。")
+            git("reset", check=False)
+            return 1
+        ahead, behind = state
+
+    if not staged and not ahead:
+        if behind:
+            print("\nGitHub のほうが %d 件新しくなっています。"
+                  "手元から送信するものはありません。" % behind)
+            print("手元に取り込むなら「5_クラウドの投稿を受け取る.bat」を実行してください。")
+        else:
+            print("\n前回の公開から変わったところがありません。送信するものはありません。")
         return 0
 
     # 内容を見せる
-    print("\n送信されるファイル: %d 件" % len(staged))
-    shown = staged[:12]
-    for f in shown:
-        print("    %s" % f)
-    if len(staged) > len(shown):
-        print("    ... ほか %d 件" % (len(staged) - len(shown)))
+    if staged:
+        print("\n送信されるファイル: %d 件" % len(staged))
+        shown = staged[:12]
+        for f in shown:
+            print("    %s" % f)
+        if len(staged) > len(shown):
+            print("    ... ほか %d 件" % (len(staged) - len(shown)))
+    if ahead:
+        print("\nまだ送信していないコミット: %d 件" % ahead)
+        titles = git("log", "--oneline", "--no-decorate", "-10",
+                     "HEAD", "--not", "--remotes=origin", check=False, quiet=True)
+        for line in titles.split("\n"):
+            if line:
+                print("    %s" % line)
+    if behind:
+        print("\nGitHub のほうが %d 件新しくなっています（スマホから公開した日記など）。" % behind)
+        print("手元の変更と合わせて、検査し直してから送信します。")
 
-    remote = git("remote", "get-url", "origin", check=False, quiet=True)
     if not remote:
         print("\n送信先（GitHub のリポジトリ）がまだ設定されていません。")
         print("GitHub でリポジトリを作ってから、そのアドレスを貼り付けてください。")
@@ -183,19 +320,23 @@ def main():
         git("reset", check=False)
         return 0
 
-    words = [a for a in args if not a.startswith("--")]
-    message = " ".join(words) if words else "日記を更新"
-    git("commit", "-m", message)
-    branch = git("rev-parse", "--abbrev-ref", "HEAD")
+    if staged:
+        words = [a for a in args if not a.startswith("--")]
+        message = " ".join(words) if words else "日記を更新"
+        git("commit", "-m", message)
+    if behind:
+        if not merge_github():
+            return 1
+        if not skip_checks and not run_checks():
+            print("\nまだ送信していません。手元の変更も GitHub の記事も消えていません。")
+            return 1
     print("\nGitHub へ送信します（ブランチ: %s）..." % branch)
     result = subprocess.run(["git", "push", "-u", "origin", branch], cwd=common.ROOT)
     if result.returncode != 0:
-        print("\n送信に失敗しました。GitHub の認証やリポジトリのアドレスを確認してください。")
-        print("コミットは手元に残っているので、直してからもう一度実行できます。")
-        print("\nスマホから投稿した日記を GitHub 側で公開したあとは、")
-        print("先に GitHub の最新を取り込む必要があります。次のどちらかを実行してください。")
-        print("  「5_クラウドの投稿を受け取る.bat」")
-        print("  python tools/sync.py")
+        print("\n送信に失敗しました。ネットワーク、GitHub の認証、リポジトリのアドレスを"
+              "確認してください。")
+        print("コミットは手元に残っています。")
+        print("直してから「3_GitHubへ公開.bat」をもう一度実行すれば、送信できます。")
         return 1
 
     print("\n公開しました。")
